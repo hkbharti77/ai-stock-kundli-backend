@@ -1,0 +1,1131 @@
+"""
+FastAPI Routes — Exposing high-performance company and market data APIs with Async SQLAlchemy.
+"""
+
+from datetime import date, datetime
+import logging
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import case, or_, desc, select, func
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_db
+from app.core.cache import cache
+from app.models.company import Company
+from app.models.financial import Financial
+from app.models.price_history import PriceHistory
+from app.models.agent_output import AgentOutput
+from app.schemas.company import CompanyResponse, CompanySearchResponse
+from app.schemas.financial import CompanyFinancialsWrapper, FinancialResponse
+from app.schemas.price_history import HistoricalPricesWrapper, PriceHistoryResponse
+from app.schemas.agent_output import AgentOutputResponse
+from app.schemas.technical_analysis import TechnicalIndicatorsWrapper
+from app.schemas.news import NewsListResponse, NewsAnalysisResponse
+from app.schemas.kundli_report import KundliReportResponse
+from app.services.agent_fundamental import FundamentalAnalystAgent
+from app.services.agent_technical import TechnicalAnalystAgent
+from app.services.agent_news import NewsAnalystAgent
+from app.services.agent_aggregator import AggregatorAgent
+
+from app.models.news_article import NewsArticle
+from app.models.user import User
+from app.core.security import get_optional_user_id
+from fastapi import Request
+
+local_rate_limit_store: dict[str, int] = {}
+
+logger = logging.getLogger("app.api.companies")
+router = APIRouter()
+
+
+
+@router.get("/search", response_model=CompanySearchResponse)
+async def search_companies(
+    q: str = Query(..., min_length=1, description="Query ticker, name, or ISIN"),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Search companies using fuzzy-style SQL matching with intelligent ranking
+    and real-time Yahoo Finance fallback registration for global equities.
+    """
+    q_clean = q.strip().upper()
+    cache_key = f"company:search:{q_clean}"
+    
+    # Try fetching from Redis cache
+    cached_val = await cache.get(cache_key)
+    if cached_val:
+        logger.info(f"Fuzzy search '{q_clean}' - HIT cache")
+        return cached_val
+
+    logger.info(f"Fuzzy search '{q_clean}' - MISS cache. Querying DB...")
+    
+    # 1. Perform dynamic Yahoo Finance search lookup to auto-register missing global/Indian stocks in DB
+    try:
+        import yfinance as yf
+        import anyio
+        
+        # Run the synchronous yfinance Search in an executor thread to keep FastAPI non-blocking
+        search_res = await anyio.to_thread.run_sync(lambda: yf.Search(q, max_results=8))
+        
+        if search_res and hasattr(search_res, "quotes") and search_res.quotes:
+            for quote in search_res.quotes:
+                type_disp = str(quote.get("typeDisp", "")).upper()
+                quote_type = str(quote.get("quoteType", "")).upper()
+                
+                # Check for Equity types only
+                if "EQUITY" in type_disp or "EQUITY" in quote_type:
+                    symbol = quote.get("symbol", "").upper()
+                    if not symbol:
+                        continue
+                        
+                    # Normalize ticker and exchange
+                    ticker = symbol
+                    exchange = quote.get("exchDisp") or quote.get("exchange") or "Global"
+                    if symbol.endswith(".NS"):
+                        ticker = symbol[:-3]
+                        exchange = "NSE"
+                        
+                    # Check if already registered
+                    stmt_check = select(Company).where(Company.ticker == ticker)
+                    check_res = await db.execute(stmt_check)
+                    existing = check_res.scalar_one_or_none()
+                    
+                    if not existing:
+                        logger.info(f"Dynamically registering equity: {ticker} ({exchange}) from yfinance Search")
+                        new_comp = Company(
+                            ticker=ticker,
+                            name=quote.get("shortname") or quote.get("longname") or ticker,
+                            exchange=exchange,
+                            sector=quote.get("sector") or "Global",
+                            sub_sector=quote.get("industry") or "Global Equities",
+                            is_active=True
+                        )
+                        db.add(new_comp)
+            
+            # Commit newly added companies to database
+            await db.commit()
+            
+    except Exception as e:
+        logger.warning(f"Yahoo Finance search dynamic registration failed: {e}", exc_info=True)
+    
+    query_str = f"%{q_clean}%"
+    starts_str = f"{q_clean}%"
+    
+    # 2. Perform priority case sorting & database search asynchronously (includes newly registered stocks)
+    stmt = select(Company).filter(
+        Company.is_active == True,
+        or_(
+            Company.ticker.ilike(query_str),
+            Company.name.ilike(query_str),
+            Company.isin.ilike(query_str)
+        )
+    ).order_by(
+        case(
+            (Company.ticker.ilike(q_clean), 1),
+            (Company.ticker.ilike(starts_str), 2),
+            (Company.name.ilike(starts_str), 3),
+            else_=4
+        ),
+        desc(Company.market_cap)
+    ).limit(15)
+    
+    result = await db.execute(stmt)
+    companies = result.scalars().all()
+    
+    # Serialize response
+    results = [CompanyResponse.from_orm(c) for c in companies]
+    payload = {"results": results, "total": len(results)}
+    
+    # Store in cache (15-minute TTL)
+    await cache.set(cache_key, payload, ttl_seconds=900)
+    
+    return payload
+
+
+@router.get("/monitoring/status")
+async def get_data_freshness_status(db: AsyncSession = Depends(get_db)):
+    """
+    SLA status & monitoring endpoint verifying data pipeline health and completeness.
+    """
+    try:
+        total_companies = (await db.execute(select(func.count(Company.id)))).scalar() or 0
+        active_companies = (await db.execute(select(func.count(Company.id)).where(Company.is_active == True))).scalar() or 0
+        companies_with_mcap = (await db.execute(select(func.count(Company.id)).where(Company.is_active == True, Company.market_cap != None))).scalar() or 0
+        
+        # Check last price record update
+        latest_price_stmt = select(PriceHistory).order_by(desc(PriceHistory.date)).limit(1)
+        latest_price_rec = (await db.execute(latest_price_stmt)).scalar_one_or_none()
+        latest_price_date = latest_price_rec.date if latest_price_rec else None
+        
+        # Check last financial statement scrape
+        latest_fin_stmt = select(Financial).order_by(desc(Financial.created_at)).limit(1)
+        latest_fin_rec = (await db.execute(latest_fin_stmt)).scalar_one_or_none()
+        latest_fin_time = latest_fin_rec.created_at if latest_fin_rec else None
+        
+        total_prices = (await db.execute(select(func.count(PriceHistory.id)))).scalar() or 0
+        total_financials = (await db.execute(select(func.count(Financial.id)))).scalar() or 0
+        
+        # Calculate Alerts & Status
+        now_dt = date.today()
+        # EOD prices SLA check
+        eod_alert = "GREEN"
+        eod_msg = "Market prices are fully up to date."
+        if not latest_price_date:
+            eod_alert = "RED"
+            eod_msg = "No EOD price history found in database."
+        else:
+            days_diff = (now_dt - latest_price_date).days
+            # Adjust for weekend
+            if now_dt.weekday() == 0:  # Monday
+                max_allowed_days = 3
+            elif now_dt.weekday() == 6:  # Sunday
+                max_allowed_days = 2
+            else:
+                max_allowed_days = 1
+                
+            if days_diff > max_allowed_days:
+                eod_alert = "AMBER"
+                eod_msg = f"Last EOD ingest was {days_diff} days ago. Expected within {max_allowed_days} days."
+                
+        # Financials SLA check
+        fin_alert = "GREEN"
+        fin_msg = "Financial statements are healthy."
+        if total_financials == 0:
+            fin_alert = "RED"
+            fin_msg = "No financial statements found in database."
+            
+        return {
+            "database_stats": {
+                "total_companies": total_companies,
+                "active_companies": active_companies,
+                "companies_with_market_cap": companies_with_mcap,
+                "total_price_candles": total_prices,
+                "total_financial_statements": total_financials,
+            },
+            "sla_metrics": {
+                "latest_price_candle_date": latest_price_date.isoformat() if latest_price_date else None,
+                "latest_financial_scrape_time": latest_fin_time.isoformat() if latest_fin_time else None,
+                "eod_prices_status": eod_alert,
+                "eod_prices_message": eod_msg,
+                "financials_status": fin_alert,
+                "financials_message": fin_msg,
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error compiling monitoring stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/fetch-realtime")
+async def fetch_company_realtime(
+    payload: dict,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Auto-registers a company from Yahoo Finance if not in DB,
+    then triggers full live enrichment (profile, prices, financials).
+    Called by the frontend when a company is not found in the database.
+    Returns the enriched company profile or a status dict.
+    """
+    ticker_raw = payload.get("ticker", "")
+    if not ticker_raw:
+        raise HTTPException(status_code=400, detail="ticker is required")
+
+    ticker_clean = ticker_raw.strip().upper()
+    logger.info(f"[fetch-realtime] Requested: {ticker_clean}")
+
+    # 1. Check if company already exists in DB
+    stmt = select(Company).where(Company.ticker == ticker_clean, Company.is_active == True)
+    result = await db.execute(stmt)
+    company = result.scalar_one_or_none()
+
+    # 2. If not found, auto-register via yfinance
+    if not company:
+        try:
+            import yfinance as yf
+            import anyio
+
+            def register_from_yfinance(t_clean: str):
+                from app.core.database import SessionLocal
+                sync_db = SessionLocal()
+                try:
+                    # Try direct ticker lookup first
+                    ticker_obj = yf.Ticker(t_clean)
+                    info = ticker_obj.info or {}
+
+                    name = (
+                        info.get("longName")
+                        or info.get("shortName")
+                        or t_clean
+                    )
+                    sector = info.get("sector") or "Uncategorized"
+                    sub_sector = info.get("industry") or "Global Equities"
+                    market_cap = info.get("marketCap")
+                    exchange_raw = info.get("exchange") or info.get("exchangeName") or "Global"
+                    exchange = "NSE" if t_clean.endswith(".NS") else exchange_raw
+
+                    # Normalize ticker
+                    normalized = t_clean.rstrip(".NS") if t_clean.endswith(".NS") else t_clean
+
+                    # Check again inside thread
+                    existing = sync_db.query(Company).filter(Company.ticker == normalized).first()
+                    if not existing:
+                        logger.info(f"[fetch-realtime] Registering new company: {normalized}")
+                        new_comp = Company(
+                            ticker=normalized,
+                            name=name,
+                            exchange=exchange,
+                            sector=sector,
+                            sub_sector=sub_sector,
+                            market_cap=market_cap,
+                            is_active=True,
+                        )
+                        sync_db.add(new_comp)
+                        sync_db.commit()
+                        sync_db.refresh(new_comp)
+
+                    # Run full enrichment
+                    from app.services.ingestion import IngestionService
+                    comp = sync_db.query(Company).filter(Company.ticker == normalized).first()
+                    if comp:
+                        IngestionService.enrich_company_data_live(sync_db, comp)
+
+                    return normalized
+                except Exception as e:
+                    logger.error(f"[fetch-realtime] Registration error for {t_clean}: {e}")
+                    sync_db.rollback()
+                    raise
+                finally:
+                    sync_db.close()
+
+            normalized_ticker = await anyio.to_thread.run_sync(register_from_yfinance, ticker_clean)
+
+            # Reload from async DB
+            stmt2 = select(Company).where(Company.ticker == normalized_ticker, Company.is_active == True)
+            result2 = await db.execute(stmt2)
+            company = result2.scalar_one_or_none()
+
+        except Exception as e:
+            logger.error(f"[fetch-realtime] Failed to register {ticker_clean}: {e}")
+            raise HTTPException(status_code=404, detail=f"Could not find or register '{ticker_clean}' from market data. Please verify the ticker symbol.")
+
+    else:
+        # Company exists — run enrichment if data is sparse
+        from app.core.database import SessionLocal
+        from app.services.ingestion import IngestionService
+        import anyio
+
+        def run_enrichment(t_clean: str):
+            sync_db = SessionLocal()
+            try:
+                comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+                if comp:
+                    IngestionService.enrich_company_data_live(sync_db, comp)
+            finally:
+                sync_db.close()
+
+        await anyio.to_thread.run_sync(run_enrichment, ticker_clean)
+
+        # Reload after enrichment
+        result = await db.execute(stmt)
+        company = result.scalar_one_or_none()
+
+    if not company:
+        raise HTTPException(status_code=404, detail=f"Ticker '{ticker_clean}' could not be registered.")
+
+    # Invalidate cached profile so next GET returns fresh data
+    await cache.delete(f"company:profile:{company.ticker}")
+
+    return CompanyResponse.from_orm(company)
+
+
+@router.get("/{ticker}", response_model=CompanyResponse)
+async def get_company_profile(ticker: str, db: AsyncSession = Depends(get_db)):
+    """
+    Retrieve static profile information for a company. Caches for 1 day.
+    """
+    ticker_clean = ticker.strip().upper()
+    cache_key = f"company:profile:{ticker_clean}"
+    
+    cached = await cache.get(cache_key)
+    if cached:
+        return cached
+        
+    stmt = select(Company).where(
+        Company.ticker == ticker_clean,
+        Company.is_active == True
+    )
+    result = await db.execute(stmt)
+    company = result.scalar_one_or_none()
+    
+    if not company:
+        raise HTTPException(status_code=404, detail=f"Company with ticker '{ticker_clean}' not found.")
+        
+    # Trigger dynamic live enrichment if profile details are missing
+    if company.market_cap is None or company.sector is None or company.sector == "Global":
+        from app.core.database import SessionLocal
+        from app.services.ingestion import IngestionService
+        import anyio
+        
+        def run_live_enrichment(t_clean: str):
+            sync_db = SessionLocal()
+            try:
+                comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+                if comp:
+                    IngestionService.enrich_company_data_live(sync_db, comp)
+            finally:
+                sync_db.close()
+                
+        await anyio.to_thread.run_sync(run_live_enrichment, ticker_clean)
+        
+        # Reload the company record from database to get the updated values
+        result = await db.execute(stmt)
+        company = result.scalar_one_or_none()
+        
+    payload = CompanyResponse.from_orm(company).dict()
+    await cache.set(cache_key, payload, ttl_seconds=86400)
+    
+    return payload
+
+
+@router.get("/{ticker}/financials", response_model=CompanyFinancialsWrapper)
+async def get_company_financials(ticker: str, db: AsyncSession = Depends(get_db)):
+    """
+    Get 10-year annual and quarterly financials for a company. Caches for 1 day.
+    """
+    ticker_clean = ticker.strip().upper()
+    cache_key = f"company:financials:{ticker_clean}"
+    
+    cached = await cache.get(cache_key)
+    if cached:
+        return cached
+        
+    stmt = select(Company).where(
+        Company.ticker == ticker_clean,
+        Company.is_active == True
+    )
+    result = await db.execute(stmt)
+    company = result.scalar_one_or_none()
+    
+    if not company:
+        raise HTTPException(status_code=404, detail=f"Company with ticker '{ticker_clean}' not found.")
+        
+    # Trigger dynamic live enrichment if financials are missing
+    stmt_check_fin = select(Financial).where(Financial.company_id == company.id).limit(1)
+    has_fin = (await db.execute(stmt_check_fin)).scalar() is not None
+    if not has_fin:
+        from app.core.database import SessionLocal
+        from app.services.ingestion import IngestionService
+        import anyio
+        
+        def run_live_enrichment(t_clean: str):
+            sync_db = SessionLocal()
+            try:
+                comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+                if comp:
+                    IngestionService.enrich_company_data_live(sync_db, comp)
+            finally:
+                sync_db.close()
+                
+        await anyio.to_thread.run_sync(run_live_enrichment, ticker_clean)
+        
+    # Query financial statements
+    stmt_annual = select(Financial).where(
+        Financial.company_id == company.id,
+        Financial.period_type == "annual"
+    ).order_by(Financial.period_end.asc())
+    res_annual = await db.execute(stmt_annual)
+    annual_stmts = res_annual.scalars().all()
+    
+    stmt_q = select(Financial).where(
+        Financial.company_id == company.id,
+        Financial.period_type == "quarterly"
+    ).order_by(Financial.period_end.asc())
+    res_q = await db.execute(stmt_q)
+    quarterly_stmts = res_q.scalars().all()
+    
+    payload = {
+        "ticker": ticker_clean,
+        "annual": [FinancialResponse.from_orm(f) for f in annual_stmts],
+        "quarterly": [FinancialResponse.from_orm(f) for f in quarterly_stmts]
+    }
+    
+    await cache.set(cache_key, payload, ttl_seconds=86400)
+    
+    return payload
+
+
+@router.get("/{ticker}/prices", response_model=HistoricalPricesWrapper)
+async def get_company_prices(
+    ticker: str,
+    from_date: Optional[date] = Query(None, description="Start date filter (YYYY-MM-DD)"),
+    to_date: Optional[date] = Query(None, description="End date filter (YYYY-MM-DD)"),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get daily price history for stock charts. Caches for 1 hour.
+    """
+    ticker_clean = ticker.strip().upper()
+    cache_key = f"company:prices:{ticker_clean}:{from_date}:{to_date}"
+    
+    cached = await cache.get(cache_key)
+    if cached:
+        return cached
+        
+    stmt = select(Company).where(
+        Company.ticker == ticker_clean,
+        Company.is_active == True
+    )
+    result = await db.execute(stmt)
+    company = result.scalar_one_or_none()
+    
+    if not company:
+        raise HTTPException(status_code=404, detail=f"Company with ticker '{ticker_clean}' not found.")
+        
+    # Trigger dynamic live enrichment if prices are missing
+    stmt_check_price = select(PriceHistory).where(PriceHistory.company_id == company.id).limit(1)
+    has_price = (await db.execute(stmt_check_price)).scalar() is not None
+    if not has_price:
+        from app.core.database import SessionLocal
+        from app.services.ingestion import IngestionService
+        import anyio
+        
+        def run_live_enrichment(t_clean: str):
+            sync_db = SessionLocal()
+            try:
+                comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+                if comp:
+                    IngestionService.enrich_company_data_live(sync_db, comp)
+            finally:
+                sync_db.close()
+                
+        await anyio.to_thread.run_sync(run_live_enrichment, ticker_clean)
+        
+    query_stmt = select(PriceHistory).where(PriceHistory.company_id == company.id)
+    
+    if from_date:
+        query_stmt = query_stmt.where(PriceHistory.date >= from_date)
+    if to_date:
+        query_stmt = query_stmt.where(PriceHistory.date <= to_date)
+        
+    query_stmt = query_stmt.order_by(PriceHistory.date.asc())
+    res_prices = await db.execute(query_stmt)
+    prices = res_prices.scalars().all()
+    
+    payload = {
+        "ticker": ticker_clean,
+        "prices": [PriceHistoryResponse.from_orm(p) for p in prices],
+        "count": len(prices)
+    }
+    
+    await cache.set(cache_key, payload, ttl_seconds=3600)
+    
+    return payload
+
+
+@router.get("/{ticker}/fundamental-analysis", response_model=AgentOutputResponse)
+async def get_fundamental_analysis(
+    ticker: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Retrieves or triggers fundamental analyst agent report.
+    Caches results in database agent_outputs table and returns the analysis.
+    """
+    ticker_clean = ticker.strip().upper()
+    
+    # 1. Check if company exists
+    stmt = select(Company).where(
+        Company.ticker == ticker_clean,
+        Company.is_active == True
+    )
+    result = await db.execute(stmt)
+    company = result.scalar_one_or_none()
+    
+    if not company:
+        raise HTTPException(status_code=404, detail=f"Company with ticker '{ticker_clean}' not found.")
+        
+    # 2. Check if cached report exists in db and is recent (< 7 days)
+    stmt_agent = select(AgentOutput).where(
+        AgentOutput.company_id == company.id,
+        AgentOutput.agent_type == "fundamental_analyst"
+    )
+    agent_res = await db.execute(stmt_agent)
+    agent_output = agent_res.scalar_one_or_none()
+    
+    is_recent = False
+    if agent_output:
+        age_days = (datetime.utcnow() - agent_output.updated_at).days
+        if age_days < 7:
+            is_recent = True
+            
+    if is_recent and agent_output:
+        return agent_output
+        
+    # 3. Trigger Fundamental Analyst Agent synchronously in a background thread to avoid loop conflicts
+    from app.core.database import SessionLocal
+    import anyio
+    import asyncio
+    
+    def run_agent_thread(t_clean: str) -> AgentOutput:
+        sync_db = SessionLocal()
+        try:
+            comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+            if not comp:
+                raise HTTPException(status_code=404, detail="Company not found in thread context.")
+            
+            # Ensure basic financials are ingested first
+            if not comp.financials:
+                from app.services.ingestion import IngestionService
+                IngestionService.enrich_company_data_live(sync_db, comp)
+                
+            # Run the async analyze_company using asyncio.run in this worker thread
+            analyzed = asyncio.run(FundamentalAnalystAgent.analyze_company(sync_db, comp))
+            return analyzed
+        finally:
+            sync_db.close()
+            
+    try:
+        agent_output = await anyio.to_thread.run_sync(run_agent_thread, ticker_clean)
+    except Exception as e:
+        logger.error(f"Error executing fundamental analyst agent: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Fundamental Analyst Agent execution failed: {str(e)}")
+        
+    return agent_output
+
+
+@router.get("/{ticker}/technical-analysis", response_model=AgentOutputResponse)
+async def get_technical_analysis(
+    ticker: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Retrieves or triggers technical analyst agent report.
+    Caches results in database agent_outputs table and returns the analysis.
+    Technical analysis expires in 1 day.
+    """
+    ticker_clean = ticker.strip().upper()
+    
+    # 1. Check if company exists
+    stmt = select(Company).where(
+        Company.ticker == ticker_clean,
+        Company.is_active == True
+    )
+    result = await db.execute(stmt)
+    company = result.scalar_one_or_none()
+    
+    if not company:
+        raise HTTPException(status_code=404, detail=f"Company with ticker '{ticker_clean}' not found.")
+        
+    # 2. Check if cached report exists in db and is recent (< 1 day)
+    stmt_agent = select(AgentOutput).where(
+        AgentOutput.company_id == company.id,
+        AgentOutput.agent_type == "technical_analyst"
+    )
+    agent_res = await db.execute(stmt_agent)
+    agent_output = agent_res.scalar_one_or_none()
+    
+    is_recent = False
+    if agent_output:
+        age_days = (datetime.utcnow() - agent_output.updated_at).days
+        if age_days < 1:
+            is_recent = True
+            
+    if is_recent and agent_output:
+        return agent_output
+        
+    # 3. Trigger Technical Analyst Agent synchronously in a background thread
+    from app.core.database import SessionLocal
+    import anyio
+    import asyncio
+    
+    def run_agent_thread(t_clean: str) -> AgentOutput:
+        sync_db = SessionLocal()
+        try:
+            comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+            if not comp:
+                raise HTTPException(status_code=404, detail="Company not found in thread context.")
+            
+            # Ensure price candles are ingested first
+            stmt_price = select(PriceHistory).where(PriceHistory.company_id == comp.id).limit(1)
+            has_price = sync_db.execute(stmt_price).scalar() is not None
+            if not has_price:
+                from app.services.ingestion import IngestionService
+                IngestionService.enrich_company_data_live(sync_db, comp)
+                
+            analyzed = asyncio.run(TechnicalAnalystAgent.analyze_company(sync_db, comp))
+            return analyzed
+        finally:
+            sync_db.close()
+            
+    try:
+        agent_output = await anyio.to_thread.run_sync(run_agent_thread, ticker_clean)
+    except Exception as e:
+        logger.error(f"Error executing technical analyst agent: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Technical Analyst Agent execution failed: {str(e)}")
+        
+    return agent_output
+
+
+@router.get("/{ticker}/technical-indicators", response_model=TechnicalIndicatorsWrapper)
+async def get_technical_indicators(
+    ticker: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get daily price history enriched with computed indicators (SMA, EMA, VWAP, Bollinger, ATR, RSI, MACD, Volume Spikes, and Relative Strength ratios).
+    Caches for 1 hour.
+    """
+    ticker_clean = ticker.strip().upper()
+    cache_key = f"company:technical_indicators:{ticker_clean}"
+    
+    cached = await cache.get(cache_key)
+    if cached:
+        return cached
+        
+    # 1. Check if company exists
+    stmt = select(Company).where(
+        Company.ticker == ticker_clean,
+        Company.is_active == True
+    )
+    result = await db.execute(stmt)
+    company = result.scalar_one_or_none()
+    
+    if not company:
+        raise HTTPException(status_code=404, detail=f"Company with ticker '{ticker_clean}' not found.")
+        
+    # 2. Trigger dynamic live enrichment if prices are missing
+    stmt_check_price = select(PriceHistory).where(PriceHistory.company_id == company.id).limit(1)
+    has_price = (await db.execute(stmt_check_price)).scalar() is not None
+    if not has_price:
+        from app.core.database import SessionLocal
+        from app.services.ingestion import IngestionService
+        import anyio
+        
+        def run_live_enrichment(t_clean: str):
+            sync_db = SessionLocal()
+            try:
+                comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+                if comp:
+                    IngestionService.enrich_company_data_live(sync_db, comp)
+            finally:
+                sync_db.close()
+                
+        await anyio.to_thread.run_sync(run_live_enrichment, ticker_clean)
+        
+    # 3. Retrieve daily prices
+    query_stmt = select(PriceHistory).where(PriceHistory.company_id == company.id).order_by(PriceHistory.date.asc())
+    res_prices = await db.execute(query_stmt)
+    prices = list(res_prices.scalars().all())
+    
+    if not prices:
+        raise HTTPException(status_code=404, detail=f"No price history found for company '{ticker_clean}'.")
+        
+    # 4. Compute Nifty relative strength and technical indicators
+    nifty_df = await TechnicalAnalystAgent.get_nifty_prices()
+    results = TechnicalAnalystAgent.compute_technical_indicators(prices, nifty_df)
+    
+    payload = {
+        "ticker": ticker_clean,
+        "support_levels": results["supports"],
+        "resistance_levels": results["resistances"],
+        "stop_loss_zone": results["stop_loss_zone"],
+        "data": results["data"],
+        "count": len(results["data"])
+    }
+    
+    # Store in Redis (1 hour TTL)
+    await cache.set(cache_key, payload, ttl_seconds=3600)
+    
+    return payload
+
+
+@router.get("/{ticker}/news", response_model=NewsListResponse)
+async def get_company_news(
+    ticker: str,
+    days: int = Query(30, ge=1, le=90, description="Lookback window in days"),
+    limit: int = Query(50, ge=1, le=100, description="Max articles to return"),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Retrieve recent classified news articles for a company.
+    Triggers a live ingestion if no recent articles exist.
+    """
+    ticker_clean = ticker.strip().upper()
+
+    stmt = select(Company).where(
+        Company.ticker == ticker_clean,
+        Company.is_active == True
+    )
+    result = await db.execute(stmt)
+    company = result.scalar_one_or_none()
+    if not company:
+        raise HTTPException(status_code=404, detail=f"Company '{ticker_clean}' not found.")
+
+    # Trigger live news ingestion if no articles exist yet
+    from app.core.database import SessionLocal
+    import anyio
+    from app.services.news import NewsService
+
+    def sync_ingest(t_clean: str):
+        sync_db = SessionLocal()
+        try:
+            comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+            if comp:
+                NewsService.ingest_news_for_company(sync_db, comp)
+        finally:
+            sync_db.close()
+
+    # Check if we have any articles for this company
+    from datetime import timedelta
+    cutoff = datetime.utcnow() - timedelta(hours=1)
+    count_stmt = select(func.count(NewsArticle.id)).where(
+        NewsArticle.company_id == company.id
+    )
+    article_count = (await db.execute(count_stmt)).scalar() or 0
+
+    if article_count == 0:
+        logger.info(f"No news found for {ticker_clean}, triggering live ingestion...")
+        await anyio.to_thread.run_sync(sync_ingest, ticker_clean)
+
+    # Build response using sync DB session for NewsService helpers
+    def build_response(t_clean: str) -> dict:
+        sync_db = SessionLocal()
+        try:
+            comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+            if not comp:
+                return {"articles": [], "sentiment_breakdown": {}, "sentiment_trend": []}
+            articles = NewsService.get_recent_articles(sync_db, comp.id, days=days, limit=limit)
+            sentiment_counts = NewsService.get_sentiment_counts(sync_db, comp.id, days=days)
+            sentiment_trend = NewsService.build_sentiment_trend(sync_db, comp.id)
+            return {
+                "articles": articles,
+                "sentiment_breakdown": sentiment_counts,
+                "sentiment_trend": sentiment_trend,
+            }
+        finally:
+            sync_db.close()
+
+    data = await anyio.to_thread.run_sync(build_response, ticker_clean)
+
+    articles_serialized = [
+        {
+            "id": a.id,
+            "company_id": a.company_id,
+            "title": a.title,
+            "content": a.content,
+            "source": a.source,
+            "url": a.url,
+            "published_at": a.published_at,
+            "classification": a.classification,
+            "impact_score": a.impact_score,
+            "sentiment": a.sentiment,
+            "risk_flags": a.risk_flags or [],
+            "created_at": a.created_at,
+        }
+        for a in data["articles"]
+    ]
+
+    return {
+        "ticker": ticker_clean,
+        "articles": articles_serialized,
+        "count": len(articles_serialized),
+        "sentiment_breakdown": data["sentiment_breakdown"],
+        "sentiment_trend": data["sentiment_trend"],
+    }
+
+
+@router.get("/{ticker}/news-analysis", response_model=NewsAnalysisResponse)
+async def get_news_analysis(
+    ticker: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Retrieve or trigger the News Analyst Agent report for a company.
+    Caches in agent_outputs for up to 4 hours.
+    """
+    ticker_clean = ticker.strip().upper()
+
+    stmt = select(Company).where(
+        Company.ticker == ticker_clean,
+        Company.is_active == True
+    )
+    result = await db.execute(stmt)
+    company = result.scalar_one_or_none()
+    if not company:
+        raise HTTPException(status_code=404, detail=f"Company '{ticker_clean}' not found.")
+
+    # Check for a recent cached analysis (< 4 hours old)
+    stmt_agent = select(AgentOutput).where(
+        AgentOutput.company_id == company.id,
+        AgentOutput.agent_type == "news_analyst"
+    )
+    agent_res = await db.execute(stmt_agent)
+    agent_output = agent_res.scalar_one_or_none()
+
+    if agent_output:
+        age_hours = (datetime.utcnow() - agent_output.updated_at).total_seconds() / 3600
+        if age_hours < 4:
+            # Return cached report
+            meta = agent_output.agent_metadata or {}
+            return {
+                "id": agent_output.id,
+                "company_id": agent_output.company_id,
+                "agent_type": agent_output.agent_type,
+                "score": agent_output.score,
+                "confidence": agent_output.confidence,
+                "trend": agent_output.trend,
+                "news_sentiment": meta.get("news_sentiment"),
+                "strengths": agent_output.strengths,
+                "concerns": agent_output.concerns,
+                "reasoning": agent_output.reasoning,
+                "top_material_events": meta.get("top_material_events", []),
+                "risk_flags": meta.get("risk_flags", []),
+                "sentiment_trend_30d": meta.get("sentiment_trend_30d"),
+                "article_count_analyzed": meta.get("article_count_analyzed"),
+                "sentiment_trend_data": meta.get("sentiment_trend_data", []),
+                "created_at": agent_output.created_at,
+                "updated_at": agent_output.updated_at,
+            }
+
+    # Trigger agent in a background sync thread
+    from app.core.database import SessionLocal
+    from app.services.agent_news import NewsAnalystAgent
+    import anyio
+    import asyncio as _asyncio
+
+    def run_news_agent(t_clean: str) -> AgentOutput:
+        sync_db = SessionLocal()
+        try:
+            comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+            if not comp:
+                raise HTTPException(status_code=404, detail="Company not found in thread context.")
+            result = _asyncio.run(NewsAnalystAgent.analyze_company(sync_db, comp))
+            return result
+        finally:
+            sync_db.close()
+
+    try:
+        agent_output = await anyio.to_thread.run_sync(run_news_agent, ticker_clean)
+    except Exception as e:
+        logger.error(f"Error executing news analyst agent: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"News Analyst Agent execution failed: {str(e)}")
+
+    meta = agent_output.agent_metadata or {}
+    return {
+        "id": agent_output.id,
+        "company_id": agent_output.company_id,
+        "agent_type": agent_output.agent_type,
+        "score": agent_output.score,
+        "confidence": agent_output.confidence,
+        "trend": agent_output.trend,
+        "news_sentiment": meta.get("news_sentiment"),
+        "strengths": agent_output.strengths,
+        "concerns": agent_output.concerns,
+        "reasoning": agent_output.reasoning,
+        "top_material_events": meta.get("top_material_events", []),
+        "risk_flags": meta.get("risk_flags", []),
+        "sentiment_trend_30d": meta.get("sentiment_trend_30d"),
+        "article_count_analyzed": meta.get("article_count_analyzed"),
+        "sentiment_trend_data": meta.get("sentiment_trend_data", []),
+        "created_at": agent_output.created_at,
+        "updated_at": agent_output.updated_at,
+    }
+
+
+@router.get("/{ticker}/kundli-report", response_model=KundliReportResponse)
+async def get_kundli_report(
+    ticker: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user_id: Optional[int] = Depends(get_optional_user_id),
+):
+    """
+    Sprint 6 — Aggregated multi-agent Kundli Report.
+    Combines Fundamental (55%), Technical (25%), and News (20%) agent scores
+    into a single weighted Kundli signal with explainable report.
+    Caches for 4 hours.
+    """
+    ticker_clean = ticker.strip().upper()
+
+    # ── Rate Limiting & Gating ──────────────────────────────────────────
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    limit = 1  # Unauthenticated
+    limit_key = f"ratelimit:ip:{request.client.host if request.client else 'unknown'}:date:{today_str}"
+    
+    if user_id:
+        user_stmt = select(User).where(User.id == user_id)
+        user_res = await db.execute(user_stmt)
+        user = user_res.scalar_one_or_none()
+        if user:
+            plan = user.plan.lower()
+            if plan == "starter":
+                limit = 20
+            elif plan in ["pro", "advisor", "admin"]:
+                limit = 999999
+            else:  # free
+                limit = 3
+            limit_key = f"ratelimit:user:{user_id}:date:{today_str}"
+
+    redis_client = None
+    try:
+        redis_client = cache.client
+    except Exception:
+        pass
+
+    current_usage = 0
+    if redis_client:
+        try:
+            val = await redis_client.get(limit_key)
+            current_usage = int(val) if val else 0
+        except Exception:
+            pass
+    else:
+        current_usage = local_rate_limit_store.get(limit_key, 0)
+
+    if current_usage >= limit:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Your plan limit is {limit} reports/day. Please upgrade your subscription."
+        )
+
+    # Increment usage count
+    if redis_client:
+        try:
+            pipe = redis_client.pipeline()
+            await pipe.incr(limit_key)
+            await pipe.expire(limit_key, 86400)
+            await pipe.execute()
+        except Exception:
+            pass
+    else:
+        local_rate_limit_store[limit_key] = current_usage + 1
+    # ──────────────────────────────────────────────────────────────────
+
+    cache_key = f"company:kundli_report:{ticker_clean}"
+
+
+    cached = await cache.get(cache_key)
+    if cached:
+        cached["cached"] = True
+        return cached
+
+    # Fetch company
+    stmt = select(Company).where(
+        Company.ticker == ticker_clean,
+        Company.is_active == True,
+    )
+    result = await db.execute(stmt)
+    company = result.scalar_one_or_none()
+    if not company:
+        raise HTTPException(status_code=404, detail=f"Company '{ticker_clean}' not found.")
+
+    # ── Check for Missing / Stale Agent Outputs ──────────────────────
+    stmt_agents = select(AgentOutput).where(AgentOutput.company_id == company.id)
+    agents_res = await db.execute(stmt_agents)
+    existing_outputs = agents_res.scalars().all()
+    agent_map = {o.agent_type: o for o in existing_outputs}
+
+    need_fundamental = True
+    if "fundamental_analyst" in agent_map:
+        age_days = (datetime.utcnow() - agent_map["fundamental_analyst"].updated_at).days
+        if age_days < 7:
+            need_fundamental = False
+
+    need_technical = True
+    if "technical_analyst" in agent_map:
+        age_days = (datetime.utcnow() - agent_map["technical_analyst"].updated_at).days
+        if age_days < 1:
+            need_technical = False
+
+    need_news = True
+    if "news_analyst" in agent_map:
+        age_hours = (datetime.utcnow() - agent_map["news_analyst"].updated_at).total_seconds() / 3600
+        if age_hours < 4:
+            need_news = False
+
+    # Run missing/stale agents in parallel
+    if need_fundamental or need_technical or need_news:
+        from app.core.database import SessionLocal
+        import asyncio
+        import anyio
+
+        def run_fundamental_sync(t_clean: str):
+            sync_db = SessionLocal()
+            try:
+                comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+                if comp:
+                    if not comp.financials:
+                        from app.services.ingestion import IngestionService
+                        IngestionService.enrich_company_data_live(sync_db, comp)
+                    asyncio.run(FundamentalAnalystAgent.analyze_company(sync_db, comp))
+            except Exception as e:
+                logger.error(f"Fundamental agent parallel thread error: {e}")
+            finally:
+                sync_db.close()
+
+        def run_technical_sync(t_clean: str):
+            sync_db = SessionLocal()
+            try:
+                comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+                if comp:
+                    from sqlalchemy import select
+                    from app.models.price_history import PriceHistory
+                    stmt_price = select(PriceHistory).where(PriceHistory.company_id == comp.id).limit(1)
+                    has_price = sync_db.execute(stmt_price).scalar() is not None
+                    if not has_price:
+                        from app.services.ingestion import IngestionService
+                        IngestionService.enrich_company_data_live(sync_db, comp)
+                    asyncio.run(TechnicalAnalystAgent.analyze_company(sync_db, comp))
+            except Exception as e:
+                logger.error(f"Technical agent parallel thread error: {e}")
+            finally:
+                sync_db.close()
+
+        def run_news_sync(t_clean: str):
+            sync_db = SessionLocal()
+            try:
+                comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+                if comp:
+                    asyncio.run(NewsAnalystAgent.analyze_company(sync_db, comp))
+            except Exception as e:
+                logger.error(f"News agent parallel thread error: {e}")
+            finally:
+                sync_db.close()
+
+        async def run_agents_in_parallel():
+            async with anyio.create_task_group() as tg:
+                if need_fundamental:
+                    tg.start_soon(anyio.to_thread.run_sync, run_fundamental_sync, ticker_clean)
+                if need_technical:
+                    tg.start_soon(anyio.to_thread.run_sync, run_technical_sync, ticker_clean)
+                if need_news:
+                    tg.start_soon(anyio.to_thread.run_sync, run_news_sync, ticker_clean)
+
+        await run_agents_in_parallel()
+
+    # Run aggregator in thread (sync ORM)
+    from app.core.database import SessionLocal
+    import anyio
+
+    def _run_aggregator():
+        sync_db = SessionLocal()
+        try:
+            sync_company = sync_db.query(Company).filter(Company.ticker == ticker_clean).first()
+            if not sync_company:
+                return None
+            report = AggregatorAgent.generate_kundli_report(sync_db, sync_company)
+            return report.model_dump(mode="json")
+        finally:
+            sync_db.close()
+
+    report_dict = await anyio.to_thread.run_sync(_run_aggregator)
+    if report_dict is None:
+        raise HTTPException(status_code=404, detail=f"Company '{ticker_clean}' not found.")
+
+    # Cache for 4 hours
+    await cache.set(cache_key, report_dict, ttl_seconds=14400)
+
+    return report_dict
+
