@@ -25,12 +25,20 @@ class SignalSensitizer(BaseModel):
     impact: str            # "high" | "medium" | "low"
 
 
+class ProbabilityHorizon(BaseModel):
+    """Calibrated probability estimate for a time horizon."""
+    horizon: str        # "1 week" | "1 month" | "3 months" | "6 months"
+    output: str         # Text description
+    probability: int    # 0 to 100 percentage
+
+
 class KundliReportResponse(BaseModel):
     """Full aggregated Kundli Report — the top-level output of Sprint 6."""
 
     # ── Identity ─────────────────────────────────────────
     ticker: str
     company_name: str
+    probability_horizons: Optional[List[ProbabilityHorizon]] = None
 
     # ── Aggregated Score ─────────────────────────────────
     kundli_score: int          # Final weighted score 0-100

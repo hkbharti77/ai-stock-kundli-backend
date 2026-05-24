@@ -1,0 +1,15 @@
+{
+    "last_calibrated_at": "2026-05-24T12:26:05.986628",
+    "accuracy_evaluated_signals": 29,
+    "pre_optimization_win_rate_pct": 86.21,
+    "post_optimization_win_rate_pct": 88.61,
+    "calibrated_weights": {
+        "fundamental_analyst": 0.28,
+        "risk_analyst": 0.18,
+        "technical_analyst": 0.14,
+        "news_analyst": 0.14,
+        "valuation_analyst": 0.12,
+        "macro_analyst": 0.09,
+        "sector_analyst": 0.05
+    }
+}

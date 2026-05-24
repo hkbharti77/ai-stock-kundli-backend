@@ -29,6 +29,20 @@ async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────
     print(f"[STARTUP] {settings.APP_NAME} v{settings.APP_VERSION} starting...")
     print(f"[STARTUP] Environment: {settings.ENVIRONMENT}")
+    
+    # Self-healing database schema sync
+    try:
+        from app.core.database import Base, sync_engine
+        import anyio
+        
+        def _create_tables():
+            Base.metadata.create_all(bind=sync_engine)
+            
+        await anyio.to_thread.run_sync(_create_tables)
+        print("[STARTUP] Database schema verified & synced successfully.")
+    except Exception as e:
+        print(f"[STARTUP ERROR] Database schema sync failed: {e}")
+        
     yield
     # ── Shutdown ─────────────────────────────────────────
     print(f"[SHUTDOWN] {settings.APP_NAME} shutting down...")

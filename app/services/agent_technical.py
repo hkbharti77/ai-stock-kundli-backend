@@ -54,8 +54,10 @@ class TechnicalAnalystAgent:
                 except Exception as cache_err:
                     logger.warning(f"Failed to cache Nifty 50: {cache_err}")
 
-                df_yf['Date'] = pd.to_datetime(df_yf['Date']).dt.date
-                return df_yf.rename(columns={'Date': 'date'})
+                # Simply return df_yf with a unique 'date' column
+                if 'Date' in df_yf.columns:
+                    df_yf = df_yf.drop(columns=['Date'])
+                return df_yf
         except Exception as e:
             logger.error(f"Failed to fetch Nifty 50 prices: {e}")
 

@@ -44,6 +44,13 @@ class Financial(Base):
     operating_cash_flow: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     free_cash_flow: Mapped[float | None] = mapped_column(Numeric, nullable=True)
 
+    # Shareholding Pattern & Pledging (Sprint 9)
+    promoter_holding_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    promoter_pledge_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    fii_holding_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    dii_holding_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    public_holding_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # Relationship

@@ -36,6 +36,9 @@ class Company(Base):
     price_history = relationship("PriceHistory", back_populates="company", lazy="selectin")
     agent_outputs = relationship("AgentOutput", back_populates="company", lazy="selectin", cascade="all, delete-orphan")
     news_articles = relationship("NewsArticle", back_populates="company", lazy="selectin", cascade="all, delete-orphan")
+    sentiment_scores = relationship("SentimentScore", back_populates="company", lazy="selectin", cascade="all, delete-orphan")
+    corporate_events = relationship("CorporateEvent", back_populates="company", lazy="selectin", cascade="all, delete-orphan")
+    social_signals = relationship("SocialSignal", back_populates="company", lazy="selectin", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<Company {self.ticker} — {self.name}>"

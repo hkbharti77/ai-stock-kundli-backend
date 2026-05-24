@@ -6,6 +6,16 @@ from app.models.user import User
 from app.models.agent_output import AgentOutput
 from app.models.news_article import NewsArticle
 from app.models.watchlist import Watchlist
+from app.models.macro import MacroData
+from app.models.sentiment_score import SentimentScore
+from app.models.corporate_event import CorporateEvent
+from app.models.social_signal import SocialSignal
+from app.models.alert_rule import AlertRule
+from app.models.alert_history import AlertHistory
+from app.models.signal_history import SignalHistory
+from app.models.signal_accuracy import SignalAccuracy
+from app.models.agent_run_log import AgentRunLog
+from app.models.user_event import UserEvent
 
 __all__ = [
     "Company",
@@ -15,6 +25,16 @@ __all__ = [
     "AgentOutput",
     "NewsArticle",
     "Watchlist",
+    "MacroData",
+    "SentimentScore",
+    "CorporateEvent",
+    "SocialSignal",
+    "AlertRule",
+    "AlertHistory",
+    "SignalHistory",
+    "SignalAccuracy",
+    "AgentRunLog",
+    "UserEvent",
 ]
 
 

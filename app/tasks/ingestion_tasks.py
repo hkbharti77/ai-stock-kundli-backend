@@ -100,3 +100,19 @@ def task_scrape_sebi_orders(self):
         db.close()
         logger.error(f"Error in task_scrape_sebi_orders: {exc}")
         raise self.retry(exc=exc, countdown=300)
+
+
+@celery_app.task(name="app.tasks.ingestion_tasks.task_ingest_macro_data", bind=True, max_retries=2)
+def task_ingest_macro_data(self):
+    """Weekly task to fetch and upsert system-wide domestic and international macroeconomic variables."""
+    logger.info("Executing Celery Task: task_ingest_macro_data")
+    db = SessionLocal()
+    try:
+        res = IngestionService.ingest_macro_data(db)
+        db.close()
+        return res
+    except Exception as exc:
+        db.rollback()
+        db.close()
+        logger.error(f"Error in task_ingest_macro_data: {exc}")
+        raise self.retry(exc=exc, countdown=300)
