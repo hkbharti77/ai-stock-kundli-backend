@@ -36,16 +36,65 @@ async def lifespan(app: FastAPI):
         import anyio
         
         def _create_tables():
+            # Create new tables
             Base.metadata.create_all(bind=sync_engine)
+            # Alter existing tables if columns are missing
+            from sqlalchemy import text
+            with sync_engine.connect() as conn:
+                # users table
+                res_users = conn.execute(
+                    text("SELECT column_name FROM information_schema.columns WHERE table_name = 'users'")
+                )
+                cols_users = [row[0] for row in res_users.all()]
+                if "tenant_id" not in cols_users:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN tenant_id INTEGER REFERENCES tenants(id) ON DELETE SET NULL"))
+                    print("[STARTUP] Added tenant_id column to users table.")
+                if "role" not in cols_users:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN role VARCHAR(50) DEFAULT 'Viewer'"))
+                    print("[STARTUP] Added role column to users table.")
+                if "is_suspended" not in cols_users:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN is_suspended BOOLEAN DEFAULT FALSE"))
+                    print("[STARTUP] Added is_suspended column to users table.")
+                
+                # api_keys table
+                res_keys = conn.execute(
+                    text("SELECT column_name FROM information_schema.columns WHERE table_name = 'api_keys'")
+                )
+                cols_keys = [row[0] for row in res_keys.all()]
+                if "tenant_id" not in cols_keys:
+                    conn.execute(text("ALTER TABLE api_keys ADD COLUMN tenant_id INTEGER REFERENCES tenants(id) ON DELETE SET NULL"))
+                    print("[STARTUP] Added tenant_id column to api_keys table.")
+
+                # api_usage_logs table
+                res_usage = conn.execute(
+                    text("SELECT column_name FROM information_schema.columns WHERE table_name = 'api_usage_logs'")
+                )
+                cols_usage = [row[0] for row in res_usage.all()]
+                if "tenant_id" not in cols_usage:
+                    conn.execute(text("ALTER TABLE api_usage_logs ADD COLUMN tenant_id INTEGER REFERENCES tenants(id) ON DELETE SET NULL"))
+                    print("[STARTUP] Added tenant_id column to api_usage_logs table.")
+
+                conn.commit()
             
         await anyio.to_thread.run_sync(_create_tables)
         print("[STARTUP] Database schema verified & synced successfully.")
     except Exception as e:
         print(f"[STARTUP ERROR] Database schema sync failed: {e}")
         
+    # Start the background intraday price loop
+    import asyncio
+    from app.services.intraday import run_intraday_ticker_loop
+    intraday_task = asyncio.create_task(run_intraday_ticker_loop())
+    print("[STARTUP] Background Intraday Loop task created.")
+    
     yield
     # ── Shutdown ─────────────────────────────────────────
     print(f"[SHUTDOWN] {settings.APP_NAME} shutting down...")
+    intraday_task.cancel()
+    try:
+        await intraday_task
+    except asyncio.CancelledError:
+        print("[SHUTDOWN] Background Intraday Loop task cancelled successfully.")
 
 
 app = FastAPI(

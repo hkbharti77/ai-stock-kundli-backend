@@ -17,6 +17,7 @@ class LLMService:
             "deepseek": os.environ.get("DEEPSEEK_API_KEY") or None,
             "gemini": os.environ.get("GEMINI_API_KEY") or None,
             "openai": os.environ.get("OPENAI_API_KEY") or None,
+            "ollama": os.environ.get("OLLAMA_API_URL") or "http://localhost:11434" if os.environ.get("OLLAMA_MODEL") or os.environ.get("OLLAMA_API_URL") else None,
         }
 
     @classmethod
@@ -66,7 +67,18 @@ class LLMService:
             except Exception as e:
                 logger.error(f"OpenAI GPT-4o call failed: {str(e)}")
 
-        # 4. Fallback to Simulation Engine
+        # 4. Try Ollama (Local LLM Fallback)
+        if keys["ollama"]:
+            logger.info("Attempting Ollama local fundamental analysis...")
+            try:
+                result = await cls._call_ollama(prompt)
+                if result:
+                    logger.info("Ollama local analysis succeeded!")
+                    return result
+            except Exception as e:
+                logger.error(f"Ollama local call failed: {str(e)}")
+
+        # 5. Fallback to Simulation Engine
         logger.warning("No API keys succeeded or provided. Running Simulation Engine...")
         return cls._run_simulation_engine(ticker, company_name, ratios)
 
@@ -175,6 +187,185 @@ Do NOT include any markdown code fences around the JSON (e.g. do not write ```js
                 return json.loads(content)
             else:
                 logger.error(f"OpenAI response error: Status {response.status_code}, {response.text}")
+        return None
+
+    @staticmethod
+    async def _call_ollama(prompt: str) -> Optional[Dict[str, Any]]:
+        ollama_url = os.environ.get("OLLAMA_API_URL", "http://localhost:11434")
+        ollama_model = os.environ.get("OLLAMA_MODEL", "gemma4:31b-cloud")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            url = f"{ollama_url.rstrip('/')}/api/generate"
+            body = {
+                "model": ollama_model,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json",
+                "options": {
+                    "temperature": 0.2
+                }
+            }
+            logger.info(f"Calling Ollama local model {ollama_model} for JSON...")
+            try:
+                response = await client.post(url, json=body)
+                if response.status_code == 200:
+                    res_data = response.json()
+                    content = res_data.get("response", "")
+                    try:
+                        return json.loads(content)
+                    except Exception as json_err:
+                        logger.error(f"Ollama JSON parse error: {str(json_err)}. Response was: {content}")
+                        import re
+                        match = re.search(r"\{.*\}", content, re.DOTALL)
+                        if match:
+                            return json.loads(match.group(0))
+                        raise
+                else:
+                    logger.error(f"Ollama response error: Status {response.status_code}, {response.text}")
+            except Exception as e:
+                logger.error(f"Ollama local API call failed: {str(e)}")
+        return None
+
+    @staticmethod
+    async def _call_deepseek_text(prompt: str) -> Optional[str]:
+        api_key = os.environ.get("DEEPSEEK_API_KEY")
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            body = {
+                "model": "deepseek-chat",
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.3
+            }
+            response = await client.post("https://api.deepseek.com/v1/chat/completions", headers=headers, json=body)
+            if response.status_code == 200:
+                res_data = response.json()
+                return res_data["choices"][0]["message"]["content"]
+            else:
+                logger.error(f"DeepSeek text response error: Status {response.status_code}, {response.text}")
+        return None
+
+    @staticmethod
+    async def _call_gemini_text(prompt: str) -> Optional[str]:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            headers = {"Content-Type": "application/json"}
+            body = {
+                "contents": [{
+                    "parts": [{"text": prompt}]
+                }],
+                "generationConfig": {
+                    "temperature": 0.3
+                }
+            }
+            response = await client.post(url, headers=headers, json=body)
+            if response.status_code == 200:
+                res_data = response.json()
+                return res_data["candidates"][0]["content"]["parts"][0]["text"]
+            else:
+                logger.error(f"Gemini text response error: Status {response.status_code}, {response.text}")
+        return None
+
+    @staticmethod
+    async def _call_openai_text(prompt: str) -> Optional[str]:
+        api_key = os.environ.get("OPENAI_API_KEY")
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            body = {
+                "model": "gpt-4o",
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.3
+            }
+            response = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=body)
+            if response.status_code == 200:
+                res_data = response.json()
+                return res_data["choices"][0]["message"]["content"]
+            else:
+                logger.error(f"OpenAI text response error: Status {response.status_code}, {response.text}")
+        return None
+
+    @staticmethod
+    async def _call_ollama_text(prompt: str) -> Optional[str]:
+        ollama_url = os.environ.get("OLLAMA_API_URL", "http://localhost:11434")
+        ollama_model = os.environ.get("OLLAMA_MODEL", "gemma4:31b-cloud")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            url = f"{ollama_url.rstrip('/')}/api/generate"
+            body = {
+                "model": ollama_model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.3
+                }
+            }
+            logger.info(f"Calling Ollama local model {ollama_model} for text...")
+            try:
+                response = await client.post(url, json=body)
+                if response.status_code == 200:
+                    res_data = response.json()
+                    return res_data.get("response", "")
+                else:
+                    logger.error(f"Ollama text response error: Status {response.status_code}, {response.text}")
+            except Exception as e:
+                logger.error(f"Ollama local text API call failed: {str(e)}")
+        return None
+
+    @classmethod
+    async def generate_text(cls, prompt: str) -> Optional[str]:
+        """
+        Generates free-form text or report using LLM chain (DeepSeek -> Gemini -> GPT-4o -> Ollama).
+        """
+        keys = cls.get_api_keys()
+
+        # 1. Try DeepSeek-V3
+        if keys["deepseek"]:
+            logger.info("Attempting DeepSeek-V3 text generation...")
+            try:
+                result = await cls._call_deepseek_text(prompt)
+                if result:
+                    return result
+            except Exception as e:
+                logger.error(f"DeepSeek-V3 text call failed: {str(e)}")
+
+        # 2. Try Gemini
+        if keys["gemini"]:
+            logger.info("Attempting Gemini text generation...")
+            try:
+                result = await cls._call_gemini_text(prompt)
+                if result:
+                    return result
+            except Exception as e:
+                logger.error(f"Gemini text call failed: {str(e)}")
+
+        # 3. Try OpenAI GPT-4o
+        if keys["openai"]:
+            logger.info("Attempting OpenAI GPT-4o text generation...")
+            try:
+                result = await cls._call_openai_text(prompt)
+                if result:
+                    return result
+            except Exception as e:
+                logger.error(f"OpenAI GPT-4o text call failed: {str(e)}")
+
+        # 4. Try Ollama (Local)
+        if keys["ollama"]:
+            logger.info("Attempting Ollama local text generation...")
+            try:
+                result = await cls._call_ollama_text(prompt)
+                if result:
+                    return result
+            except Exception as e:
+                logger.error(f"Ollama local text call failed: {str(e)}")
+
         return None
 
     @classmethod
@@ -340,7 +531,18 @@ Overall, {ticker} exhibits a {"strong and robust" if score >= 75 else "healthy a
             except Exception as e:
                 logger.error(f"OpenAI GPT-4o call failed: {str(e)}")
 
-        # 4. Fallback to Simulation Engine
+        # 4. Try Ollama (Local LLM Fallback)
+        if keys["ollama"]:
+            logger.info("Attempting Ollama local technical analysis...")
+            try:
+                result = await cls._call_ollama(prompt)
+                if result:
+                    logger.info("Ollama local technical analysis succeeded!")
+                    return result
+            except Exception as e:
+                logger.error(f"Ollama local technical call failed: {str(e)}")
+
+        # 5. Fallback to Simulation Engine
         logger.warning("No API keys succeeded or provided. Running Simulation Engine...")
         return cls._run_technical_simulation(ticker, company_name, summary)
 
@@ -547,7 +749,18 @@ Overall, {ticker} is showing {"strong buying momentum with indicators aligned in
             except Exception as e:
                 logger.error(f"OpenAI GPT-4o risk call failed: {str(e)}")
 
-        # 4. Fallback to Simulation
+        # 4. Try Ollama (Local LLM Fallback)
+        if keys["ollama"]:
+            logger.info("Attempting Ollama local risk analysis...")
+            try:
+                result = await cls._call_ollama(prompt)
+                if result:
+                    logger.info("Ollama local risk analysis succeeded!")
+                    return result
+            except Exception as e:
+                logger.error(f"Ollama local risk call failed: {str(e)}")
+
+        # 5. Fallback to Simulation
         logger.warning("No API keys succeeded or provided. Running Risk Simulation Engine...")
         return cls._run_risk_simulation(ticker, company_name, metrics)
 
@@ -673,7 +886,10 @@ Do NOT include any markdown code fences around the JSON (e.g. do not write ```js
         if len(concerns) < 2:
             concerns.append("Minor increase in short term trade receivables could affect liquidity.")
             
-        # Reasoning
+        # 3. Speculative Volatility & Regulatory Alerts (Market & regulatory checks)
+        regulator_name = "SEC" if (not ticker.endswith(".NS") and not ticker.endswith(".BO")) else "SEBI"
+        
+        # Compile reasoning
         reasoning = f"""### **Governance & Safety Risk Report: {company_name} ({ticker})**
 
 Humne {company_name} ke corporate governance, leverage matrix, and market volatility ka complete assessment kiya hai. Stock ka overall safety score **{score}/100** hai, jo isko **{cat.upper()} RISK** category mein classify karta hai.
@@ -686,7 +902,7 @@ Humne {company_name} ke corporate governance, leverage matrix, and market volati
 
 #### **3. Speculative Volatility & Regulatory Alerts (Market & regulatory checks)**
 * **Price Volatility**: Stock ki 30-day return volatility **{volatility:.2f}%** hai, jo reflect karti hai ki {"price action kafi stable aur non-speculative hai." if volatility < 25 else "medium-term volatility hai. Retail investors ko wild price swings se alert rehna chahiye."}
-* **Legal Check**: {"Regulatory or legal news flags are absolutely clear. SEBI registers display no active negative corporate updates." if not has_legal else "Warning! Legal alerts or SEBI order keywords were flagged recently. Risk management team strictly advises caution on fresh investments."}
+* **Legal Check**: {"Regulatory or legal news flags are absolutely clear. {regulator_name} registers display no active negative corporate updates." if not has_legal else "Warning! Legal alerts or {regulator_name} order keywords were flagged recently. Risk management team strictly advises caution on fresh investments."}
 
 #### **Analyst Verdict**
 Overall, {ticker} is showing a **{cat}** risk configuration. {"Corporate governance patterns are stable, and the capital structure suggests high safety for defensive retail portfolios." if score >= 75 else "Moderate safety with manageable risks. Suitable for standard portfolio allocation." if score >= 55 else "High speculation parameters. High leverage or pledging triggers could lead to capital loss under volatile market phases. Retail entry is not recommended for defensive investors."}
@@ -745,7 +961,18 @@ Overall, {ticker} is showing a **{cat}** risk configuration. {"Corporate governa
             except Exception as e:
                 logger.error(f"OpenAI GPT-4o macro call failed: {str(e)}")
 
-        # 4. Fallback to Simulation
+        # 4. Try Ollama (Local LLM Fallback)
+        if keys["ollama"]:
+            logger.info("Attempting Ollama local macro analysis...")
+            try:
+                result = await cls._call_ollama(prompt)
+                if result:
+                    logger.info("Ollama local macro analysis succeeded!")
+                    return result
+            except Exception as e:
+                logger.error(f"Ollama local macro call failed: {str(e)}")
+
+        # 5. Fallback to Simulation
         logger.warning("No API keys succeeded or provided. Running Macro Simulation Engine...")
         return cls._run_macro_simulation(ticker, company_name, sector, macro_variables)
 
@@ -944,7 +1171,18 @@ Overall, {company_name} is experiencing a **{trend.upper()}** environment. {"The
             except Exception as e:
                 logger.error(f"OpenAI GPT-4o sector call failed: {str(e)}")
 
-        # 4. Fallback to Simulation
+        # 4. Try Ollama (Local LLM Fallback)
+        if keys["ollama"]:
+            logger.info("Attempting Ollama local sector analysis...")
+            try:
+                result = await cls._call_ollama(prompt)
+                if result:
+                    logger.info("Ollama local sector analysis succeeded!")
+                    return result
+            except Exception as e:
+                logger.error(f"Ollama local sector call failed: {str(e)}")
+
+        # 5. Fallback to Simulation
         logger.warning("No API keys succeeded or provided. Running Sector Simulation Engine...")
         return cls._run_sector_simulation(ticker, company_name, sector, peers_summary)
 
@@ -1128,7 +1366,18 @@ Target company is positioned at a highly defensive **{rank_str}** within the sec
             except Exception as e:
                 logger.error(f"OpenAI GPT-4o valuation call failed: {str(e)}")
 
-        # 4. Fallback to Simulation
+        # 4. Try Ollama (Local LLM Fallback)
+        if keys["ollama"]:
+            logger.info("Attempting Ollama local valuation analysis...")
+            try:
+                result = await cls._call_ollama(prompt)
+                if result:
+                    logger.info("Ollama local valuation analysis succeeded!")
+                    return result
+            except Exception as e:
+                logger.error(f"Ollama local valuation call failed: {str(e)}")
+
+        # 5. Fallback to Simulation
         logger.warning("No API keys succeeded or provided. Running Valuation Simulation Engine...")
         return cls._run_valuation_simulation(ticker, company_name, metrics)
 
@@ -1303,7 +1552,18 @@ Do NOT include any markdown code fences around the JSON. Return ONLY the raw JSO
             except Exception as e:
                 logger.error(f"OpenAI GPT-4o sentiment failed: {str(e)}")
 
-        # 4. Fallback to Simulation
+        # 4. Try Ollama (Local LLM Fallback)
+        if keys["ollama"]:
+            logger.info("Attempting Ollama local nuanced sentiment...")
+            try:
+                result = await cls._call_ollama(prompt)
+                if result:
+                    logger.info("Ollama local nuanced sentiment succeeded!")
+                    return result
+            except Exception as e:
+                logger.error(f"Ollama local sentiment call failed: {str(e)}")
+
+        # 5. Fallback to Simulation
         logger.warning("Running High-Fidelity FinBERT simulated sentiment fallback...")
         return cls._run_nuanced_sentiment_simulation(ticker, company_name, text_to_analyze)
 

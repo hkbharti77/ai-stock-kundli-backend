@@ -1731,5 +1731,143 @@ async def get_company_signal_history(ticker: str, db: AsyncSession = Depends(get
     }
 
 
+@router.get("/{ticker}/intraday", response_model=dict)
+async def get_company_intraday_prices(
+    ticker: str,
+    user_id: int = 1,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Returns 5-minute intraday price history for a stock.
+    Restricted to Pro+ and Advisor plans (pro/advisor).
+    """
+    # 1. Gating check
+    stmt_user = select(User).where(User.id == user_id)
+    user_res = await db.execute(stmt_user)
+    user = user_res.scalar_one_or_none()
+    if not user or user.plan not in ["pro", "advisor"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Premium subscription required for Intraday 5m price history."
+        )
+
+    ticker_clean = ticker.strip().upper()
+    
+    # 2. Check if company exists
+    comp_stmt = select(Company).where(Company.ticker == ticker_clean)
+    comp_res = await db.execute(comp_stmt)
+    company = comp_res.scalar_one_or_none()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    from app.models.intraday_price import IntradayPrice
+    from datetime import timedelta
+
+    # 3. Fetch intraday prices from database (last 2 days)
+    cutoff = datetime.utcnow() - timedelta(days=2)
+    stmt_prices = select(IntradayPrice).where(
+        IntradayPrice.company_id == company.id,
+        IntradayPrice.timestamp >= cutoff
+    ).order_by(IntradayPrice.timestamp.asc())
+    
+    prices_res = await db.execute(stmt_prices)
+    prices = prices_res.scalars().all()
+    
+    # If no intraday prices exist in the DB, trigger an immediate sync
+    if not prices:
+        from app.services.intraday import IntradayService
+        from app.core.database import SessionLocal
+        import anyio
+        
+        def run_sync(t_clean: str):
+            sync_db = SessionLocal()
+            try:
+                comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+                if comp:
+                    import asyncio
+                    return asyncio.run(IntradayService.ingest_intraday_for_company(sync_db, comp))
+            finally:
+                sync_db.close()
+                
+        await anyio.to_thread.run_sync(run_sync, ticker_clean)
+        
+        # Query again
+        prices_res = await db.execute(stmt_prices)
+        prices = prices_res.scalars().all()
+
+    items = []
+    for p in prices:
+        items.append({
+            "timestamp": p.timestamp.isoformat(),
+            "open": float(p.open) if p.open else 0.0,
+            "high": float(p.high) if p.high else 0.0,
+            "low": float(p.low) if p.low else 0.0,
+            "close": float(p.close) if p.close else 0.0,
+            "volume": int(p.volume) if p.volume else 0,
+            "rsi": float(p.rsi) if p.rsi else 50.0,
+            "vwap": float(p.vwap) if p.vwap else (float(p.close) if p.close else 0.0)
+        })
+
+    return {
+        "ticker": ticker_clean,
+        "prices": items,
+        "count": len(items)
+    }
+
+
+from fastapi import WebSocket, WebSocketDisconnect
+
+@router.websocket("/{ticker}/live")
+async def websocket_intraday_endpoint(websocket: WebSocket, ticker: str, user_id: int = 1):
+    """
+    WebSocket endpoint for real-time 5m price bar streaming.
+    Premium gating is enforced on plan tier check (pro/advisor).
+    """
+    await websocket.accept()
+    
+    from app.core.database import SessionLocal
+    from app.models.user import User
+    from app.core.websocket import manager
+
+    db = SessionLocal()
+    try:
+        # 1. Fetch user to check subscription plan
+        stmt = select(User).where(User.id == user_id)
+        user = db.execute(stmt).scalar_one_or_none()
+        
+        if not user or user.plan not in ["pro", "advisor"]:
+            await websocket.send_json({
+                "type": "error",
+                "message": "Premium Subscription required for Live Intraday Updates (Pro+)."
+            })
+            await websocket.close(code=4003)
+            return
+            
+        # 2. Add ticker to active websocket tracking set
+        from app.services.intraday import active_websocket_tickers
+        ticker_clean = ticker.strip().upper()
+        active_websocket_tickers.add(ticker_clean)
+        
+        # Register user websocket with ConnectionManager
+        await manager.connect(websocket, user_id)
+        logger.info(f"[WS Price] User {user_id} subscribed to live updates for {ticker_clean}")
+        
+        # Keep connection open
+        while True:
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_text("pong")
+                
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, user_id)
+        logger.info(f"[WS Price] User {user_id} disconnected from live updates for {ticker}")
+    except Exception as e:
+        logger.error(f"[WS Price Error] Exception in endpoint for user {user_id}: {e}")
+        manager.disconnect(websocket, user_id)
+    finally:
+        db.close()
+
+
+
 
 

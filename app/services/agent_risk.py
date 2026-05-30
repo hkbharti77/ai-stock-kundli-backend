@@ -79,7 +79,9 @@ class RiskAnalystAgent:
                     volatility = 22.5
         
         # 3. Check for Regulatory or Legal Alerts in News Table
-        legal_keywords = ["sebi", "legal", "fraud", "scam", "lawsuit", "investigation", "litigation", "court", "complaint", "order", "audit"]
+        is_global = company.exchange not in ["NSE", "BSE"]
+        regulator = "sec" if is_global else "sebi"
+        legal_keywords = [regulator, "legal", "fraud", "scam", "lawsuit", "investigation", "litigation", "court", "complaint", "order", "audit"]
         news_records = db.query(NewsArticle).filter(NewsArticle.company_id == company.id).all()
         
         has_legal_alerts = False

@@ -248,6 +248,14 @@ class AggregatorAgent:
                     f"AI Kundli rating for {company.ticker} transitioned from {old_signal} to {signal_label_en} (Score: {kundli_score})",
                     "high"
                 )
+                # Dispatch Webhooks asynchronously
+                from app.services.webhook_service import WebhookService
+                try:
+                    WebhookService.trigger_signal_change(
+                        db, company.id, old_signal, signal_label_en, old_score, kundli_score
+                    )
+                except Exception as e:
+                    logger.error(f"Error dispatching webhooks: {e}")
 
         return KundliReportResponse(
             ticker=company.ticker,

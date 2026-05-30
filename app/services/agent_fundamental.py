@@ -33,7 +33,8 @@ class FundamentalAnalystAgent:
             fin_summary = "No annual financial statements were available in the database."
         else:
             ratios = cls._compute_financial_ratios(annual_financials)
-            fin_summary = cls._generate_financials_summary(annual_financials)
+            is_global = company.exchange not in ["NSE", "BSE"]
+            fin_summary = cls._generate_financials_summary(annual_financials, is_global=is_global)
 
         # 2. Call the LLM Client Service
         analysis_data = await LLMService.generate_fundamental_analysis(
@@ -162,12 +163,13 @@ class FundamentalAnalystAgent:
         }
 
     @staticmethod
-    def _generate_financials_summary(financials: List[Financial]) -> str:
+    def _generate_financials_summary(financials: List[Financial], is_global: bool = False) -> str:
         """
         Creates a clean Markdown table summarizing the historical financial periods.
         """
+        unit = "$M" if is_global else "Cr"
         summary_lines = [
-            "| Period End | Revenue (Cr) | EBITDA (Cr) | PAT (Cr) | ROE (%) | ROCE (%) | Debt/Equity |",
+            f"| Period End | Revenue ({unit}) | EBITDA ({unit}) | PAT ({unit}) | ROE (%) | ROCE (%) | Debt/Equity |",
             "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
         ]
         

@@ -8,8 +8,9 @@ from sqlalchemy import (
     DateTime,
     Integer,
     String,
+    ForeignKey,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
 
@@ -17,6 +18,14 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    role: Mapped[str] = mapped_column(
+        String(50), default="Viewer"  # SuperAdmin / OrgAdmin / Analyst / Viewer
+    )
+    is_suspended: Mapped[bool] = mapped_column(Boolean, default=False)
+
     email: Mapped[str] = mapped_column(
         String(255), unique=True, nullable=False, index=True
     )
@@ -27,6 +36,12 @@ class User(Base):
     )
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # ── Custom White-Label Advisor Branding ──
+    advisor_brand_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    advisor_logo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    advisor_brand_color: Mapped[str | None] = mapped_column(String(7), nullable=True)
+    advisor_brand_color_secondary: Mapped[str | None] = mapped_column(String(7), nullable=True)
 
     # ── Multi-Step SEBI Compliance & Registration Fields ──
     phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
@@ -44,6 +59,7 @@ class User(Base):
     # ── Legal & Mandate ──
     disclaimer_accepted: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    tenant = relationship("Tenant", lazy="selectin")
 
     def __repr__(self) -> str:
         return f"<User {self.email} plan={self.plan}>"

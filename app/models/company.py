@@ -34,6 +34,7 @@ class Company(Base):
     # Relationships
     financials = relationship("Financial", back_populates="company", lazy="selectin")
     price_history = relationship("PriceHistory", back_populates="company", lazy="selectin")
+    intraday_prices = relationship("IntradayPrice", back_populates="company", lazy="selectin", cascade="all, delete-orphan")
     agent_outputs = relationship("AgentOutput", back_populates="company", lazy="selectin", cascade="all, delete-orphan")
     news_articles = relationship("NewsArticle", back_populates="company", lazy="selectin", cascade="all, delete-orphan")
     sentiment_scores = relationship("SentimentScore", back_populates="company", lazy="selectin", cascade="all, delete-orphan")
