@@ -367,8 +367,10 @@ async def fetch_company_realtime(
     if not company:
         raise HTTPException(status_code=404, detail=f"Ticker '{ticker_clean}' could not be registered.")
 
-    # Invalidate cached profile so next GET returns fresh data
+    # Invalidate cached profile, prices, and financials so next GET returns fresh data
     await cache.delete(f"company:profile:{company.ticker}")
+    await cache.delete(f"company:prices:{company.ticker}:None:None")
+    await cache.delete(f"company:financials:{company.ticker}")
 
     return CompanyResponse.from_orm(company)
 
@@ -540,7 +542,8 @@ async def get_company_prices(
         "count": len(prices)
     }
     
-    await cache.set(cache_key, payload, ttl_seconds=3600)
+    if prices:
+        await cache.set(cache_key, payload, ttl_seconds=3600)
     
     return payload
 
