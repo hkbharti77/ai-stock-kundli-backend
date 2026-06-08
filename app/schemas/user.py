@@ -52,6 +52,26 @@ class VerifyOTPRequest(BaseModel):
     code: str = Field(..., min_length=6, max_length=6)
 
 
+# ── Password Reset Flow ──────────────────────────────────────
+
+class ForgotPasswordRequest(BaseModel):
+    """Initiate password reset — send OTP to registered email."""
+    email: EmailStr
+
+
+class VerifyResetOTPRequest(BaseModel):
+    """Verify the password reset OTP code."""
+    email: EmailStr
+    code: str = Field(..., min_length=6, max_length=6)
+
+
+class ResetPasswordRequest(BaseModel):
+    """Set a new password after OTP verification."""
+    email: EmailStr
+    code: str = Field(..., min_length=6, max_length=6)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
 
 # ── Responses ────────────────────────────────────────────────
 

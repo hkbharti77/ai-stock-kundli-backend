@@ -19,6 +19,8 @@ from app.core.config import get_settings
 from app.models.company import Company
 from app.models.financial import Financial
 from app.models.news_article import NewsArticle
+from app.models.price_history import PriceHistory
+from app.models.intraday_price import IntradayPrice
 from app.services.embedding_service import EmbeddingService
 
 from fastapi import BackgroundTasks
@@ -250,105 +252,36 @@ class QueryEngine:
 
     @classmethod
     async def _call_llm_json(cls, prompt: str) -> Optional[Dict[str, Any]]:
-        """Invokes LLM with failover pipeline (Gemini -> DeepSeek -> OpenAI -> Ollama) expecting JSON."""
-        # We try to use Gemini first as it is configured, then OpenAI, then local Ollama.
-        api_keys = {
-            "gemini": settings.GEMINI_API_KEY or None,
-            "deepseek": settings.DEEPSEEK_API_KEY or None,
-            "openai": settings.OPENAI_API_KEY or None,
-            "ollama": settings.OLLAMA_API_URL or "http://localhost:11434" if settings.OLLAMA_MODEL or settings.OLLAMA_API_URL else None,
-        }
+        """Invokes Ollama local LLM directly as the primary LLM, expecting JSON output."""
+        ollama_url = settings.OLLAMA_API_URL or "http://localhost:11434"
+        model = settings.OLLAMA_MODEL or "gemma3:4b"
 
-        # 1. Gemini Flash (configured with API Key)
-        if api_keys["gemini"]:
-            try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_keys['gemini']}"
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    body = {
-                        "contents": [{"parts": [{"text": prompt}]}],
-                        "generationConfig": {
-                            "temperature": 0.1,
-                            "responseMimeType": "application/json"
-                        }
-                    }
-                    response = await client.post(url, headers={"Content-Type": "application/json"}, json=body)
-                    if response.status_code == 200:
-                        res_data = response.json()
-                        text_content = res_data["candidates"][0]["content"]["parts"][0]["text"]
-                        return json.loads(cls._clean_json_text(text_content))
-                    else:
-                        logger.warning(f"Gemini failed: {response.text}")
-            except Exception as e:
-                logger.error(f"Gemini API call failed in QueryEngine: {e}")
-
-        # 2. DeepSeek Chat
-        if api_keys["deepseek"]:
-            try:
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    body = {
-                        "model": "deepseek-chat",
-                        "messages": [
-                            {"role": "system", "content": "You are an assistant returning ONLY JSON."},
-                            {"role": "user", "content": prompt}
-                        ],
+        logger.info(f"[LLM] Calling Ollama model '{model}' at {ollama_url}")
+        try:
+            async with httpx.AsyncClient(timeout=180.0) as client:
+                body = {
+                    "model": model,
+                    "prompt": prompt + "\n\nIMPORTANT: Return ONLY a raw valid JSON object. No markdown, no code fences, no explanation.",
+                    "format": "json",
+                    "stream": False,
+                    "options": {
                         "temperature": 0.1,
-                        "response_format": {"type": "json_object"}
+                        "num_predict": 4096,
                     }
-                    response = await client.post(
-                        "https://api.deepseek.com/v1/chat/completions",
-                        headers={"Authorization": f"Bearer {api_keys['deepseek']}", "Content-Type": "application/json"},
-                        json=body
-                    )
-                    if response.status_code == 200:
-                        content = response.json()["choices"][0]["message"]["content"]
-                        return json.loads(cls._clean_json_text(content))
-            except Exception as e:
-                logger.error(f"DeepSeek call failed: {e}")
+                }
+                response = await client.post(f"{ollama_url.rstrip('/')}/api/generate", json=body)
+                if response.status_code == 200:
+                    content = response.json().get("response", "")
+                    logger.info(f"[LLM] Ollama responded successfully ({len(content)} chars)")
+                    return json.loads(cls._clean_json_text(content))
+                else:
+                    logger.error(f"[LLM] Ollama returned HTTP {response.status_code}: {response.text[:300]}")
+        except json.JSONDecodeError as e:
+            logger.error(f"[LLM] Ollama JSON parse error: {e}")
+        except Exception as e:
+            logger.error(f"[LLM] Ollama call failed: {e}")
 
-        # 3. OpenAI GPT-4o
-        if api_keys["openai"]:
-            try:
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    body = {
-                        "model": "gpt-4o",
-                        "messages": [
-                            {"role": "system", "content": "You are a helpful assistant that returns only valid JSON."},
-                            {"role": "user", "content": prompt}
-                        ],
-                        "temperature": 0.1,
-                        "response_format": {"type": "json_object"}
-                    }
-                    response = await client.post(
-                        "https://api.openai.com/v1/chat/completions",
-                        headers={"Authorization": f"Bearer {api_keys['openai']}", "Content-Type": "application/json"},
-                        json=body
-                    )
-                    if response.status_code == 200:
-                        content = response.json()["choices"][0]["message"]["content"]
-                        return json.loads(cls._clean_json_text(content))
-            except Exception as e:
-                logger.error(f"OpenAI call failed: {e}")
-
-        # 4. Ollama Local LLM
-        if api_keys["ollama"]:
-            try:
-                model = settings.OLLAMA_MODEL or "gemma4:31b-cloud"
-                async with httpx.AsyncClient(timeout=120.0) as client:
-                    body = {
-                        "model": model,
-                        "prompt": prompt + "\n\nReturn response in raw JSON format only.",
-                        "format": "json",
-                        "stream": False,
-                        "options": {"temperature": 0.1}
-                    }
-                    response = await client.post(f"{api_keys['ollama'].rstrip('/')}/api/generate", json=body)
-                    if response.status_code == 200:
-                        content = response.json()["response"]
-                        return json.loads(cls._clean_json_text(content))
-            except Exception as e:
-                logger.error(f"Ollama local call failed: {e}")
-
-        # Fallback simulated response if no LLM succeeded
+        # All LLMs failed — return None to trigger simulated fallback
         return None
 
     @classmethod
@@ -441,7 +374,7 @@ Return a JSON object with this format:
 
     @classmethod
     def _fetch_company_data(cls, db: Session, tickers: List[str]) -> List[Dict[str, Any]]:
-        """Fetches detailed db metrics for specific company tickers."""
+        """Fetches detailed db metrics for specific company tickers, including latest prices."""
         companies = db.query(Company).filter(Company.ticker.in_(tickers), Company.is_active == True).all()
         results = []
         for c in companies:
@@ -451,9 +384,102 @@ Return a JSON object with this format:
                 "sector": c.sector,
                 "sub_sector": c.sub_sector,
                 "market_cap": float(c.market_cap) if c.market_cap is not None else None,
-                "financials": []
+                "financials": [],
+                "price_data": None,
+                "price_history_10d": []
             }
-            # Fetch last 4 financials (annual & quarterly)
+
+            # ── Fetch latest daily close price (LTP) from price_history ──
+            try:
+                latest_price_row = (
+                    db.query(PriceHistory)
+                    .filter(PriceHistory.company_id == c.id)
+                    .order_by(PriceHistory.date.desc())
+                    .first()
+                )
+                prev_price_row = (
+                    db.query(PriceHistory)
+                    .filter(PriceHistory.company_id == c.id)
+                    .order_by(PriceHistory.date.desc())
+                    .offset(1)
+                    .first()
+                )
+
+                # 52-week high/low
+                from datetime import date as dt_date, timedelta
+                one_year_ago = dt_date.today() - timedelta(days=365)
+                high_52w_row = (
+                    db.query(PriceHistory)
+                    .filter(PriceHistory.company_id == c.id, PriceHistory.date >= one_year_ago)
+                    .order_by(PriceHistory.high.desc())
+                    .first()
+                )
+                low_52w_row = (
+                    db.query(PriceHistory)
+                    .filter(PriceHistory.company_id == c.id, PriceHistory.date >= one_year_ago)
+                    .order_by(PriceHistory.low.asc())
+                    .first()
+                )
+
+                # Latest intraday close (more real-time than daily)
+                intraday_latest = (
+                    db.query(IntradayPrice)
+                    .filter(IntradayPrice.company_id == c.id)
+                    .order_by(IntradayPrice.timestamp.desc())
+                    .first()
+                )
+
+                ltp = None
+                ltp_source = None
+                if intraday_latest and intraday_latest.close:
+                    ltp = float(intraday_latest.close)
+                    ltp_source = f"Intraday ({intraday_latest.timestamp.strftime('%Y-%m-%d %H:%M')})"
+                elif latest_price_row and latest_price_row.close:
+                    ltp = float(latest_price_row.close)
+                    ltp_source = f"Daily close ({latest_price_row.date})"
+
+                prev_close = float(prev_price_row.close) if (prev_price_row and prev_price_row.close) else None
+                change_pct = None
+                if ltp and prev_close and prev_close > 0:
+                    change_pct = round(((ltp - prev_close) / prev_close) * 100, 2)
+
+                c_data["price_data"] = {
+                    "ltp": ltp,
+                    "ltp_source": ltp_source,
+                    "prev_close": prev_close,
+                    "change_pct": change_pct,
+                    "day_open": float(latest_price_row.open) if (latest_price_row and latest_price_row.open) else None,
+                    "day_high": float(latest_price_row.high) if (latest_price_row and latest_price_row.high) else None,
+                    "day_low": float(latest_price_row.low) if (latest_price_row and latest_price_row.low) else None,
+                    "week52_high": float(high_52w_row.high) if (high_52w_row and high_52w_row.high) else None,
+                    "week52_low": float(low_52w_row.low) if (low_52w_row and low_52w_row.low) else None,
+                    "intraday_rsi": float(intraday_latest.rsi) if (intraday_latest and intraday_latest.rsi) else None,
+                    "intraday_vwap": float(intraday_latest.vwap) if (intraday_latest and intraday_latest.vwap) else None,
+                }
+
+                # Last 10 trading days OHLCV for chart context
+                recent_prices = (
+                    db.query(PriceHistory)
+                    .filter(PriceHistory.company_id == c.id)
+                    .order_by(PriceHistory.date.desc())
+                    .limit(10)
+                    .all()
+                )
+                c_data["price_history_10d"] = [
+                    {
+                        "date": str(p.date),
+                        "open": float(p.open) if p.open else None,
+                        "high": float(p.high) if p.high else None,
+                        "low": float(p.low) if p.low else None,
+                        "close": float(p.close) if p.close else None,
+                        "volume": int(p.volume) if p.volume else None,
+                    }
+                    for p in reversed(recent_prices)
+                ]
+            except Exception as e:
+                logger.warning(f"Failed to fetch price data for {c.ticker}: {e}")
+
+            # Fetch last 8 financials (annual & quarterly)
             financial_records = db.query(Financial).filter(Financial.company_id == c.id).order_by(Financial.period_end.desc()).limit(8).all()
             for f in financial_records:
                 c_data["financials"].append({
@@ -637,23 +663,36 @@ User's Query: "{query}"
 Gathered Context:
 {json.dumps(context_data, indent=2)}
 
+IMPORTANT — PRICE DATA INSTRUCTIONS:
+- The context above contains REAL-TIME stock price data from our live database under each company's "price_data" and "price_history_10d" fields.
+- "price_data.ltp" = Latest Traded Price (LTP) — the most current stock price available.
+- "price_data.change_pct" = Today's price change percentage vs previous close.
+- "price_data.week52_high" and "price_data.week52_low" = 52-week high and low prices.
+- "price_data.intraday_rsi" = Latest RSI technical indicator value.
+- "price_data.intraday_vwap" = Latest VWAP (Volume Weighted Average Price).
+- "price_history_10d" = Last 10 trading days OHLCV data for trend analysis.
+- ALWAYS use this price data to answer price-related questions. NEVER say you don't have real-time prices — you DO have them in the context.
+- Format prices with ₹ symbol. Example: ₹202.72
+
 Guidelines:
 1. Provide a comprehensive, professional, and detailed answer in the "answer" field. Write in Markdown.
 2. {language_guideline}
-3. If the query asks for comparison or numerical listings, structure it as a table, comparison matrix, or chart.
-4. Set the "type" field to:
-   - "chart": if you are returning numerical series or comparison charts (e.g. quarterly revenue/pat/ratios).
-   - "table": if you are listing multiple stocks, metrics, or rows.
-   - "comparison": if you are doing a side-by-side company matrix.
+3. If the query asks for price data, ALWAYS include: LTP, day change %, 52W high/low, RSI, and VWAP if available.
+4. If the query asks for comparison or numerical listings, structure it as a table, comparison matrix, or chart.
+5. Set the "type" field to:
+   - "chart": if returning price trends, numerical series, or comparison charts. Use "price_history_10d" data for price charts.
+   - "table": if listing multiple stocks, metrics, or rows.
+   - "comparison": if doing a side-by-side company matrix.
    - "text": for purely conversational or text/news-related queries.
-5. Populating "data" field:
+6. Populating "data" field:
    - For "table": {{ "headers": ["Header1", "Header2"], "rows": [["val1", "val2"], ["val3", "val4"]] }}
-   - For "chart": {{ "chartType": "line" | "bar" | "area", "xKey": "label", "dataKeys": ["pat", "revenue", "roe" etc], "chartData": [ {{ "label": "Q1", "pat": 10.4, "revenue": 100.5 }}, ... ] }}
-   - For "comparison": {{ "headers": ["Metric", "Ticker1", "Ticker2"], "rows": [ ["ROE", "15.4%", "12.0%"], ["Revenue Growth", "12%", "8%"] ] }}
-6. Populate "links" with action URLs:
-   - If ticker 'RELIANCE' is discussed, add a link like: {{ "text": "View RELIANCE Kundli", "url": "/dashboard/stocks/RELIANCE" }}
-7. Generate 2-3 interactive, relevant, and short follow-up questions in "suggestions".
-8. Populate "sources" with an array of financial data sources or databases leveraged for this information.
+   - For "chart" with price data: {{ "chartType": "area", "xKey": "date", "dataKeys": ["close"], "chartData": [ {{ "date": "2026-06-01", "close": 202.72 }}, ... ] }}
+   - For "chart" with financials: {{ "chartType": "line" | "bar" | "area", "xKey": "label", "dataKeys": ["pat", "revenue"], "chartData": [...] }}
+   - For "comparison": {{ "headers": ["Metric", "Ticker1", "Ticker2"], "rows": [ ["LTP", "₹202.72", "₹1450.30"], ["ROE", "15.4%", "12.0%"] ] }}
+7. Populate "links" with action URLs:
+   - If ticker 'TATASTEEL' is discussed, add: {{ "text": "View TATASTEEL Kundli", "url": "/dashboard/stocks/TATASTEEL" }}
+8. Generate 2-3 interactive, relevant, and short follow-up questions in "suggestions".
+9. Populate "sources" with an array of financial data sources or databases leveraged for this information.
 
 Return response in valid JSON matching this schema EXACTLY:
 {{

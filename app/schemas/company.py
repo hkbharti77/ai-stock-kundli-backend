@@ -19,6 +19,7 @@ class CompanyResponse(BaseModel):
     exchange: str | None
     market_cap: float | None
     is_active: bool
+    currency: str = "INR"
 
     @model_validator(mode="before")
     @classmethod

@@ -98,6 +98,33 @@ class IngestionService:
             return f"{comp.ticker}.NS" if not comp.ticker.endswith(".NS") else comp.ticker
         elif exchange in ("BSE", "BOM") or comp.ticker.endswith(".BO"):
             return f"{comp.ticker}.BO" if not comp.ticker.endswith(".BO") else comp.ticker
+            
+        # Self-healing logic for companies with missing exchange
+        ticker_clean = comp.ticker.upper()
+        import yfinance as yf
+        
+        # Test candidate .NS first
+        try:
+            candidate_ns = f"{ticker_clean}.NS"
+            t_obj = yf.Ticker(candidate_ns)
+            hist = t_obj.history(period="1d")
+            if not hist.empty:
+                comp.exchange = "NSE"
+                return candidate_ns
+        except Exception:
+            pass
+            
+        # Test candidate .BO next
+        try:
+            candidate_bo = f"{ticker_clean}.BO"
+            t_obj = yf.Ticker(candidate_bo)
+            hist = t_obj.history(period="1d")
+            if not hist.empty:
+                comp.exchange = "BSE"
+                return candidate_bo
+        except Exception:
+            pass
+            
         return comp.ticker
 
     @staticmethod

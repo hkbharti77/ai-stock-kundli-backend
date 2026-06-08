@@ -33,6 +33,9 @@ from app.schemas.user import (
     UserProfileUpdate,
     SendOTPRequest,
     VerifyOTPRequest,
+    ForgotPasswordRequest,
+    VerifyResetOTPRequest,
+    ResetPasswordRequest,
 )
 
 settings = get_settings()
@@ -112,6 +115,68 @@ def send_otp_email(to_email: str, otp_code: str):
             server.sendmail(settings.SMTP_USERNAME, to_email, msg.as_string())
     except Exception as e:
         print(f"[SMTP Error] Failed to send email to {to_email}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"SMTP dispatch failure: {str(e)}"
+        )
+
+
+def _send_reset_otp_email(to_email: str, otp_code: str):
+    """Send a password-reset OTP email (distinct styling from registration OTP)."""
+    if not settings.SMTP_USERNAME or not settings.SMTP_PASSWORD:
+        print(f"[MOCK SMTP] Password reset OTP for {to_email}: {otp_code}")
+        return
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"{otp_code} — AI Stock Kundli Password Reset"
+    msg["From"] = f"AI Stock Kundli <{settings.SMTP_USERNAME}>"
+    msg["To"] = to_email
+
+    html_content = f"""
+    <html>
+      <body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #0b0f19; color: #f3f4f6; padding: 20px; margin: 0;">
+        <table align="center" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 600px; background: #111827; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5); overflow: hidden;">
+          <tr>
+            <td style="padding: 40px 30px; text-align: center; background: linear-gradient(135deg, #1e1b4b 0%, #111827 100%); border-bottom: 1px solid rgba(255, 255, 255, 0.05);">
+              <h1 style="color: #f59e0b; margin: 0; font-size: 28px; font-weight: bold; letter-spacing: 1px;">🔐 Password Reset</h1>
+              <p style="color: #9ca3af; margin: 5px 0 0 0; font-size: 14px; font-weight: 500;">AI Stock Kundli — Secure Account Recovery</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 40px 30px; color: #e5e7eb;">
+              <p style="font-size: 16px; margin: 0 0 16px 0; font-weight: 500;">Hello,</p>
+              <p style="font-size: 15px; line-height: 1.6; margin: 0 0 24px 0; color: #d1d5db;">We received a request to reset your AI Stock Kundli account password. Use the secure code below to proceed:</p>
+              
+              <table align="center" border="0" cellpadding="0" cellspacing="0" style="margin: 30px auto;">
+                <tr>
+                  <td style="background: rgba(245, 158, 11, 0.12); border: 1px solid #f59e0b; color: #fbbf24; font-size: 32px; font-weight: bold; letter-spacing: 6px; padding: 14px 35px; border-radius: 8px; font-family: 'Courier New', Courier, monospace; text-align: center;">
+                    {otp_code}
+                  </td>
+                </tr>
+              </table>
+              
+              <p style="font-size: 14px; line-height: 1.5; color: #9ca3af; margin: 24px 0 0 0;">This code expires in <strong>5 minutes</strong>. If you did not request a password reset, please ignore this email — your account is safe.</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 25px 30px; background: #0f172a; border-top: 1px solid rgba(255, 255, 255, 0.05); font-size: 11px; color: #6b7280; text-align: center; line-height: 1.6;">
+              <p style="margin: 0 0 8px 0;">SEBI Research Analyst Compliance: This platform provides research-driven insights and AI models for informational purposes, not personalized investment advice.</p>
+              <p style="margin: 0;">&copy; {time.strftime('%Y')} AI Stock Kundli. All rights reserved.</p>
+            </td>
+          </tr>
+        </table>
+      </body>
+    </html>
+    """
+    msg.attach(MIMEText(html_content, "html"))
+
+    try:
+        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
+            server.starttls()
+            server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
+            server.sendmail(settings.SMTP_USERNAME, to_email, msg.as_string())
+    except Exception as e:
+        print(f"[SMTP Error] Failed to send reset email to {to_email}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"SMTP dispatch failure: {str(e)}"
@@ -337,3 +402,136 @@ async def update_profile(
     await db.refresh(user)
     
     return user
+
+
+# ── Password Reset via Email OTP ────────────────────────────────
+
+@router.post(
+    "/forgot-password",
+    response_model=MessageResponse,
+    summary="Send a password reset OTP to a registered email",
+)
+async def forgot_password(
+    payload: ForgotPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Step 1 of password reset.
+    Checks that the email exists in the DB, then sends a 6-digit reset OTP.
+    Always returns 200 regardless of whether the email exists (security best practice).
+    """
+    result = await db.execute(select(User).where(User.email == payload.email))
+    user = result.scalar_one_or_none()
+
+    # Always generate and "send" to prevent user enumeration
+    otp_code = f"{random.randint(100000, 999999)}"
+
+    if user:
+        # Store with "reset:" prefix to distinguish from registration OTPs
+        if redis_client:
+            redis_client.setex(f"reset:{payload.email}", 300, otp_code)
+        else:
+            otp_store[f"reset:{payload.email}"] = (otp_code, time.time() + 300)
+
+        # Build a distinct password-reset email
+        _send_reset_otp_email(payload.email, otp_code)
+
+    return MessageResponse(
+        message="If an account with that email exists, a password reset code has been sent."
+    )
+
+
+@router.post(
+    "/verify-reset-otp",
+    response_model=MessageResponse,
+    summary="Verify the password reset OTP code",
+)
+async def verify_reset_otp(
+    payload: VerifyResetOTPRequest,
+):
+    """
+    Step 2 of password reset.
+    Validates the 6-digit OTP and stamps a short-lived 'reset_verified' flag.
+    """
+    verified = False
+
+    if redis_client:
+        cached = redis_client.get(f"reset:{payload.email}")
+        if cached and cached == payload.code:
+            redis_client.delete(f"reset:{payload.email}")
+            redis_client.setex(f"reset_verified:{payload.email}", 600, "true")
+            verified = True
+    else:
+        key = f"reset:{payload.email}"
+        if key in otp_store:
+            cached_otp, expires_at = otp_store[key]
+            if time.time() < expires_at and cached_otp == payload.code:
+                del otp_store[key]
+                otp_store[f"reset_verified:{payload.email}"] = ("true", time.time() + 600)
+                verified = True
+
+    if not verified:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset code. Please request a new one.",
+        )
+
+    return MessageResponse(message="Reset code verified. You may now set a new password.")
+
+
+@router.post(
+    "/reset-password",
+    response_model=MessageResponse,
+    summary="Set a new password after OTP verification",
+)
+async def reset_password(
+    payload: ResetPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Step 3 of password reset.
+    Re-validates the OTP (idempotent safety) and updates the password hash.
+    The reset_verified flag is consumed on success.
+    """
+    # Re-check the OTP so this endpoint can't be called without prior verification
+    verified = False
+
+    if redis_client:
+        cached = redis_client.get(f"reset:{payload.email}")
+        if cached and cached == payload.code:
+            redis_client.delete(f"reset:{payload.email}")
+            redis_client.delete(f"reset_verified:{payload.email}")
+            verified = True
+        elif redis_client.get(f"reset_verified:{payload.email}") == "true":
+            redis_client.delete(f"reset_verified:{payload.email}")
+            verified = True
+    else:
+        reset_key = f"reset:{payload.email}"
+        verified_key = f"reset_verified:{payload.email}"
+        if reset_key in otp_store:
+            cached_otp, expires_at = otp_store[reset_key]
+            if time.time() < expires_at and cached_otp == payload.code:
+                del otp_store[reset_key]
+                otp_store.pop(verified_key, None)
+                verified = True
+        elif verified_key in otp_store:
+            cached_val, expires_at = otp_store[verified_key]
+            if time.time() < expires_at and cached_val == "true":
+                del otp_store[verified_key]
+                verified = True
+
+    if not verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Reset not authorised. Please request a new OTP.",
+        )
+
+    result = await db.execute(select(User).where(User.email == payload.email))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    user.password_hash = hash_password(payload.new_password)
+    await db.commit()
+
+    return MessageResponse(message="Password has been reset successfully. You may now log in.")

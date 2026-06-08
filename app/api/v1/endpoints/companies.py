@@ -375,6 +375,53 @@ async def fetch_company_realtime(
     return CompanyResponse.from_orm(company)
 
 
+def is_international_company(company: Company) -> bool:
+    if not company:
+        return False
+    exch = (company.exchange or "").upper()
+    tick = (company.ticker or "").upper()
+    if exch in ("NYSE", "NASDAQ"):
+        return True
+    if exch not in ("NSE", "BSE") and not (tick.endswith(".NS") or tick.endswith(".BO")):
+        return True
+    return False
+
+
+async def get_usd_inr_rate_from_db_or_live(db: AsyncSession) -> float | None:
+    try:
+        from app.models.macro import MacroData
+        stmt_rate = select(MacroData).where(MacroData.indicator == "inr_usd")
+        rate_res = await db.execute(stmt_rate)
+        rate_row = rate_res.scalar_one_or_none()
+        if rate_row and rate_row.value:
+            return float(rate_row.value)
+    except Exception as e:
+        logger.warning(f"Error fetching rate from DB: {e}")
+        
+    try:
+        import yfinance as yf
+        import anyio
+        
+        def _fetch_live():
+            forex = yf.Ticker("INR=X")
+            hist = forex.history(period="1d")
+            if not hist.empty:
+                return float(hist["Close"].iloc[-1])
+            forex2 = yf.Ticker("USDINR=X")
+            hist2 = forex2.history(period="1d")
+            if not hist2.empty:
+                return float(hist2["Close"].iloc[-1])
+            return None
+            
+        rate = await anyio.to_thread.run_sync(_fetch_live)
+        if rate:
+            return rate
+    except Exception as e:
+        logger.warning(f"Error fetching live USD-INR rate: {e}")
+        
+    return None
+
+
 @router.get("/{ticker}", response_model=CompanyResponse)
 async def get_company_profile(ticker: str, db: AsyncSession = Depends(get_db)):
     """
@@ -418,7 +465,20 @@ async def get_company_profile(ticker: str, db: AsyncSession = Depends(get_db)):
         result = await db.execute(stmt)
         company = result.scalar_one_or_none()
         
-    payload = CompanyResponse.from_orm(company).dict()
+    resp_obj = CompanyResponse.from_orm(company)
+    
+    if is_international_company(company):
+        rate = await get_usd_inr_rate_from_db_or_live(db)
+        if rate:
+            resp_obj.currency = "INR"
+            if resp_obj.market_cap is not None:
+                resp_obj.market_cap = float(resp_obj.market_cap) * rate
+        else:
+            resp_obj.currency = "USD"
+    else:
+        resp_obj.currency = "INR"
+        
+    payload = resp_obj.dict()
     await cache.set(cache_key, payload, ttl_seconds=86400)
     
     return payload
@@ -536,10 +596,38 @@ async def get_company_prices(
     res_prices = await db.execute(query_stmt)
     prices = res_prices.scalars().all()
     
+    currency = "INR"
+    converted_prices = []
+    
+    if is_international_company(company):
+        rate = await get_usd_inr_rate_from_db_or_live(db)
+        if rate:
+            for p in prices:
+                p_resp = PriceHistoryResponse.from_orm(p)
+                if p_resp.open is not None:
+                    p_resp.open = round(p_resp.open * rate, 2)
+                if p_resp.high is not None:
+                    p_resp.high = round(p_resp.high * rate, 2)
+                if p_resp.low is not None:
+                    p_resp.low = round(p_resp.low * rate, 2)
+                if p_resp.close is not None:
+                    p_resp.close = round(p_resp.close * rate, 2)
+                converted_prices.append(p_resp)
+            currency = "INR"
+        else:
+            for p in prices:
+                converted_prices.append(PriceHistoryResponse.from_orm(p))
+            currency = "USD"
+    else:
+        for p in prices:
+            converted_prices.append(PriceHistoryResponse.from_orm(p))
+        currency = "INR"
+
     payload = {
         "ticker": ticker_clean,
-        "prices": [PriceHistoryResponse.from_orm(p) for p in prices],
-        "count": len(prices)
+        "prices": [p.dict() for p in converted_prices],
+        "count": len(converted_prices),
+        "currency": currency
     }
     
     if prices:

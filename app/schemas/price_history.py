@@ -26,3 +26,5 @@ class HistoricalPricesWrapper(BaseModel):
     ticker: str
     prices: list[PriceHistoryResponse]
     count: int
+    currency: str = "INR"
+
