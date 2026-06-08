@@ -78,8 +78,13 @@ async def lifespan(app: FastAPI):
             
         await anyio.to_thread.run_sync(_create_tables)
         print("[STARTUP] Database schema verified & synced successfully.")
+        
+        # Initialize vector store
+        from app.services.embedding_service import EmbeddingService
+        EmbeddingService.initialize_store()
+        print("[STARTUP] FAISS Vector Store initialized successfully.")
     except Exception as e:
-        print(f"[STARTUP ERROR] Database schema sync failed: {e}")
+        print(f"[STARTUP ERROR] Startup initialization failed: {e}")
         
     # Start the background intraday price loop
     import asyncio

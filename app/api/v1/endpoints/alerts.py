@@ -6,9 +6,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from app.core.database import get_db
+from app.core.security import get_current_user_id
 from app.models.company import Company
 from app.models.alert_rule import AlertRule
 from app.models.alert_history import AlertHistory
+from app.models.watchlist import Watchlist
+from app.models.user_event import UserEvent
 from app.core.websocket import manager
 
 router = APIRouter()
@@ -31,7 +34,7 @@ class AlertRuleUpdate(BaseModel):
 
 
 @router.get("/rules", response_model=dict)
-async def get_alert_rules(user_id: int = 1, db: AsyncSession = Depends(get_db)):
+async def get_alert_rules(user_id: int = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
     """Retrieves all configured alert rules for a user."""
     stmt = select(AlertRule, Company).outerjoin(Company, Company.id == AlertRule.company_id).where(AlertRule.user_id == user_id)
     res = await db.execute(stmt)
@@ -56,7 +59,7 @@ async def get_alert_rules(user_id: int = 1, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/rules", response_model=dict)
-async def create_alert_rule(rule_in: AlertRuleCreate, user_id: int = 1, db: AsyncSession = Depends(get_db)):
+async def create_alert_rule(rule_in: AlertRuleCreate, user_id: int = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
     """Creates a new alert rule."""
     company_id = None
     if rule_in.ticker:
@@ -84,7 +87,7 @@ async def create_alert_rule(rule_in: AlertRuleCreate, user_id: int = 1, db: Asyn
 
 
 @router.put("/rules/{rule_id}", response_model=dict)
-async def update_alert_rule(rule_id: int, update_in: AlertRuleUpdate, user_id: int = 1, db: AsyncSession = Depends(get_db)):
+async def update_alert_rule(rule_id: int, update_in: AlertRuleUpdate, user_id: int = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
     """Updates or mutes an existing alert rule."""
     stmt = select(AlertRule).where(AlertRule.id == rule_id, AlertRule.user_id == user_id)
     res = await db.execute(stmt)
@@ -111,7 +114,7 @@ async def update_alert_rule(rule_id: int, update_in: AlertRuleUpdate, user_id: i
 
 
 @router.delete("/rules/{rule_id}", response_model=dict)
-async def delete_alert_rule(rule_id: int, user_id: int = 1, db: AsyncSession = Depends(get_db)):
+async def delete_alert_rule(rule_id: int, user_id: int = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
     """Deletes an alert rule."""
     stmt = delete(AlertRule).where(AlertRule.id == rule_id, AlertRule.user_id == user_id)
     await db.execute(stmt)
@@ -120,12 +123,48 @@ async def delete_alert_rule(rule_id: int, user_id: int = 1, db: AsyncSession = D
 
 
 @router.get("/history", response_model=dict)
-async def get_alert_history(user_id: int = 1, ticker: Optional[str] = None, db: AsyncSession = Depends(get_db)):
+async def get_alert_history(user_id: int = Depends(get_current_user_id), ticker: Optional[str] = None, db: AsyncSession = Depends(get_db)):
     """Retrieves chronological alert logs list."""
     stmt = select(AlertHistory, Company).outerjoin(Company, Company.id == AlertHistory.company_id).where(AlertHistory.user_id == user_id)
     
     if ticker:
         stmt = stmt.where(Company.ticker == ticker.strip().upper())
+    else:
+        # Fetch user's watchlist company IDs
+        watchlist_stmt = select(Watchlist.company_id).where(Watchlist.user_id == user_id)
+        wl_res = await db.execute(watchlist_stmt)
+        watchlist_company_ids = [r[0] for r in wl_res.all() if r[0] is not None]
+
+        # Fetch user's visited/searched stock tickers from UserEvents
+        events_stmt = select(UserEvent.event_data).where(
+            UserEvent.user_id == user_id,
+            UserEvent.event_name.in_(["view_stock", "search_stock"])
+        )
+        evt_res = await db.execute(events_stmt)
+        visited_tickers = set()
+        for r in evt_res.all():
+            data = r[0]
+            if isinstance(data, dict) and "ticker" in data:
+                visited_tickers.add(data["ticker"].strip().upper())
+
+        # Resolve visited/searched tickers to company IDs
+        visited_company_ids = []
+        if visited_tickers:
+            comp_stmt = select(Company.id).where(Company.ticker.in_(list(visited_tickers)))
+            comp_res = await db.execute(comp_stmt)
+            visited_company_ids = [r[0] for r in comp_res.all()]
+
+        # Combine company IDs
+        allowed_company_ids = list(set(watchlist_company_ids + visited_company_ids))
+
+        # Filter the statement (allow global/system alerts with company_id = None too)
+        if allowed_company_ids:
+            stmt = stmt.where(
+                (AlertHistory.company_id.in_(allowed_company_ids)) | 
+                (AlertHistory.company_id == None)
+            )
+        else:
+            stmt = stmt.where(AlertHistory.company_id == None)
         
     stmt = stmt.order_by(AlertHistory.delivered_at.desc()).limit(50)
     res = await db.execute(stmt)

@@ -5,19 +5,22 @@ import httpx
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
+from app.core.config import get_settings
+
 logger = logging.getLogger("LLMService")
+settings = get_settings()
 
 class LLMService:
     @staticmethod
     def get_api_keys() -> Dict[str, Optional[str]]:
         """
-        Retrieve API keys from environment.
+        Retrieve API keys from settings.
         """
         return {
-            "deepseek": os.environ.get("DEEPSEEK_API_KEY") or None,
-            "gemini": os.environ.get("GEMINI_API_KEY") or None,
-            "openai": os.environ.get("OPENAI_API_KEY") or None,
-            "ollama": os.environ.get("OLLAMA_API_URL") or "http://localhost:11434" if os.environ.get("OLLAMA_MODEL") or os.environ.get("OLLAMA_API_URL") else None,
+            "deepseek": settings.DEEPSEEK_API_KEY or None,
+            "gemini": settings.GEMINI_API_KEY or None,
+            "openai": settings.OPENAI_API_KEY or None,
+            "ollama": settings.OLLAMA_API_URL or "http://localhost:11434" if settings.OLLAMA_MODEL or settings.OLLAMA_API_URL else None,
         }
 
     @classmethod
@@ -113,7 +116,7 @@ Do NOT include any markdown code fences around the JSON (e.g. do not write ```js
 
     @staticmethod
     async def _call_deepseek(prompt: str) -> Optional[Dict[str, Any]]:
-        api_key = os.environ.get("DEEPSEEK_API_KEY")
+        api_key = settings.DEEPSEEK_API_KEY
         async with httpx.AsyncClient(timeout=15.0) as client:
             headers = {
                 "Authorization": f"Bearer {api_key}",
@@ -140,9 +143,9 @@ Do NOT include any markdown code fences around the JSON (e.g. do not write ```js
 
     @staticmethod
     async def _call_gemini(prompt: str) -> Optional[Dict[str, Any]]:
-        api_key = os.environ.get("GEMINI_API_KEY")
+        api_key = settings.GEMINI_API_KEY
         # Direct REST API call for Gemini (no heavy imports needed!)
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
         async with httpx.AsyncClient(timeout=15.0) as client:
             headers = {"Content-Type": "application/json"}
             body = {
@@ -165,7 +168,7 @@ Do NOT include any markdown code fences around the JSON (e.g. do not write ```js
 
     @staticmethod
     async def _call_openai(prompt: str) -> Optional[Dict[str, Any]]:
-        api_key = os.environ.get("OPENAI_API_KEY")
+        api_key = settings.OPENAI_API_KEY
         async with httpx.AsyncClient(timeout=15.0) as client:
             headers = {
                 "Authorization": f"Bearer {api_key}",
@@ -191,8 +194,8 @@ Do NOT include any markdown code fences around the JSON (e.g. do not write ```js
 
     @staticmethod
     async def _call_ollama(prompt: str) -> Optional[Dict[str, Any]]:
-        ollama_url = os.environ.get("OLLAMA_API_URL", "http://localhost:11434")
-        ollama_model = os.environ.get("OLLAMA_MODEL", "gemma4:31b-cloud")
+        ollama_url = settings.OLLAMA_API_URL or "http://localhost:11434"
+        ollama_model = settings.OLLAMA_MODEL or "gemma4:31b-cloud"
         async with httpx.AsyncClient(timeout=30.0) as client:
             url = f"{ollama_url.rstrip('/')}/api/generate"
             body = {
@@ -227,7 +230,7 @@ Do NOT include any markdown code fences around the JSON (e.g. do not write ```js
 
     @staticmethod
     async def _call_deepseek_text(prompt: str) -> Optional[str]:
-        api_key = os.environ.get("DEEPSEEK_API_KEY")
+        api_key = settings.DEEPSEEK_API_KEY
         async with httpx.AsyncClient(timeout=20.0) as client:
             headers = {
                 "Authorization": f"Bearer {api_key}",
@@ -250,8 +253,8 @@ Do NOT include any markdown code fences around the JSON (e.g. do not write ```js
 
     @staticmethod
     async def _call_gemini_text(prompt: str) -> Optional[str]:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        api_key = settings.GEMINI_API_KEY
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
         async with httpx.AsyncClient(timeout=20.0) as client:
             headers = {"Content-Type": "application/json"}
             body = {
@@ -272,7 +275,7 @@ Do NOT include any markdown code fences around the JSON (e.g. do not write ```js
 
     @staticmethod
     async def _call_openai_text(prompt: str) -> Optional[str]:
-        api_key = os.environ.get("OPENAI_API_KEY")
+        api_key = settings.OPENAI_API_KEY
         async with httpx.AsyncClient(timeout=20.0) as client:
             headers = {
                 "Authorization": f"Bearer {api_key}",
@@ -295,8 +298,8 @@ Do NOT include any markdown code fences around the JSON (e.g. do not write ```js
 
     @staticmethod
     async def _call_ollama_text(prompt: str) -> Optional[str]:
-        ollama_url = os.environ.get("OLLAMA_API_URL", "http://localhost:11434")
-        ollama_model = os.environ.get("OLLAMA_MODEL", "gemma4:31b-cloud")
+        ollama_url = settings.OLLAMA_API_URL or "http://localhost:11434"
+        ollama_model = settings.OLLAMA_MODEL or "gemma4:31b-cloud"
         async with httpx.AsyncClient(timeout=30.0) as client:
             url = f"{ollama_url.rstrip('/')}/api/generate"
             body = {
@@ -887,7 +890,7 @@ Do NOT include any markdown code fences around the JSON (e.g. do not write ```js
             concerns.append("Minor increase in short term trade receivables could affect liquidity.")
             
         # 3. Speculative Volatility & Regulatory Alerts (Market & regulatory checks)
-        regulator_name = "SEC" if (not ticker.endswith(".NS") and not ticker.endswith(".BO")) else "SEBI"
+        regulator_name = metrics.get("regulator_name") or ("SEC" if (not ticker.endswith(".NS") and not ticker.endswith(".BO")) else "SEBI")
         
         # Compile reasoning
         reasoning = f"""### **Governance & Safety Risk Report: {company_name} ({ticker})**

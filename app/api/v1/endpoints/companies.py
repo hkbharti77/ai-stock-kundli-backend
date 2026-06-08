@@ -5,7 +5,7 @@ FastAPI Routes — Exposing high-performance company and market data APIs with A
 from datetime import date, datetime
 import logging
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy import case, or_, desc, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -88,6 +88,9 @@ async def search_companies(
                     if symbol.endswith(".NS"):
                         ticker = symbol[:-3]
                         exchange = "NSE"
+                    elif symbol.endswith(".BO"):
+                        ticker = symbol[:-3]
+                        exchange = "BSE"
                         
                     # Check if already registered
                     stmt_check = select(Company).where(Company.ticker == ticker)
@@ -221,16 +224,33 @@ async def get_data_freshness_status(db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def run_background_enrichment(ticker_clean: str):
+    from app.core.database import SessionLocal
+    from app.services.ingestion import IngestionService
+    sync_db = SessionLocal()
+    try:
+        comp = sync_db.query(Company).filter(Company.ticker == ticker_clean).first()
+        if comp:
+            logger.info(f"[Background Enrichment] Starting for {ticker_clean}")
+            IngestionService.enrich_company_data_live(sync_db, comp)
+            logger.info(f"[Background Enrichment] Completed for {ticker_clean}")
+    except Exception as e:
+        logger.error(f"[Background Enrichment] Failed for {ticker_clean}: {e}")
+    finally:
+        sync_db.close()
+
+
 @router.post("/fetch-realtime")
 async def fetch_company_realtime(
     payload: dict,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db)
 ):
     """
     Auto-registers a company from Yahoo Finance if not in DB,
-    then triggers full live enrichment (profile, prices, financials).
+    then triggers full live enrichment (profile, prices, financials) in background.
     Called by the frontend when a company is not found in the database.
-    Returns the enriched company profile or a status dict.
+    Returns the company profile.
     """
     ticker_raw = payload.get("ticker", "")
     if not ticker_raw:
@@ -254,9 +274,33 @@ async def fetch_company_realtime(
                 from app.core.database import SessionLocal
                 sync_db = SessionLocal()
                 try:
-                    # Try direct ticker lookup first
-                    ticker_obj = yf.Ticker(t_clean)
-                    info = ticker_obj.info or {}
+                    # Resolve correct yfinance symbol by checking candidates
+                    candidates = [t_clean]
+                    if not t_clean.endswith(".NS") and not t_clean.endswith(".BO"):
+                        candidates.append(f"{t_clean}.NS")
+                        candidates.append(f"{t_clean}.BO")
+
+                    resolved_symbol = t_clean
+                    info = {}
+                    for symbol in candidates:
+                        try:
+                            ticker_obj = yf.Ticker(symbol)
+                            # Verify if symbol has history
+                            hist = ticker_obj.history(period="1d")
+                            if not hist.empty:
+                                resolved_symbol = symbol
+                                info = ticker_obj.info or {}
+                                break
+                        except Exception as ex:
+                            logger.warning(f"[fetch-realtime] Failed validating candidate {symbol}: {ex}")
+
+                    # If info is still empty, try direct lookup on t_clean just in case
+                    if not info:
+                        try:
+                            ticker_obj = yf.Ticker(t_clean)
+                            info = ticker_obj.info or {}
+                        except Exception:
+                            pass
 
                     name = (
                         info.get("longName")
@@ -267,10 +311,14 @@ async def fetch_company_realtime(
                     sub_sector = info.get("industry") or "Global Equities"
                     market_cap = info.get("marketCap")
                     exchange_raw = info.get("exchange") or info.get("exchangeName") or "Global"
-                    exchange = "NSE" if t_clean.endswith(".NS") else exchange_raw
+                    exchange = "NSE" if resolved_symbol.endswith(".NS") else ("BSE" if resolved_symbol.endswith(".BO") else exchange_raw)
 
                     # Normalize ticker
-                    normalized = t_clean.rstrip(".NS") if t_clean.endswith(".NS") else t_clean
+                    normalized = resolved_symbol
+                    if resolved_symbol.endswith(".NS"):
+                        normalized = resolved_symbol[:-3]
+                    elif resolved_symbol.endswith(".BO"):
+                        normalized = resolved_symbol[:-3]
 
                     # Check again inside thread
                     existing = sync_db.query(Company).filter(Company.ticker == normalized).first()
@@ -289,12 +337,6 @@ async def fetch_company_realtime(
                         sync_db.commit()
                         sync_db.refresh(new_comp)
 
-                    # Run full enrichment
-                    from app.services.ingestion import IngestionService
-                    comp = sync_db.query(Company).filter(Company.ticker == normalized).first()
-                    if comp:
-                        IngestionService.enrich_company_data_live(sync_db, comp)
-
                     return normalized
                 except Exception as e:
                     logger.error(f"[fetch-realtime] Registration error for {t_clean}: {e}")
@@ -310,30 +352,17 @@ async def fetch_company_realtime(
             result2 = await db.execute(stmt2)
             company = result2.scalar_one_or_none()
 
+            # Queue background enrichment task
+            if company:
+                background_tasks.add_task(run_background_enrichment, company.ticker)
+
         except Exception as e:
             logger.error(f"[fetch-realtime] Failed to register {ticker_clean}: {e}")
             raise HTTPException(status_code=404, detail=f"Could not find or register '{ticker_clean}' from market data. Please verify the ticker symbol.")
 
     else:
-        # Company exists — run enrichment if data is sparse
-        from app.core.database import SessionLocal
-        from app.services.ingestion import IngestionService
-        import anyio
-
-        def run_enrichment(t_clean: str):
-            sync_db = SessionLocal()
-            try:
-                comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
-                if comp:
-                    IngestionService.enrich_company_data_live(sync_db, comp)
-            finally:
-                sync_db.close()
-
-        await anyio.to_thread.run_sync(run_enrichment, ticker_clean)
-
-        # Reload after enrichment
-        result = await db.execute(stmt)
-        company = result.scalar_one_or_none()
+        # Company exists — queue background enrichment task
+        background_tasks.add_task(run_background_enrichment, company.ticker)
 
     if not company:
         raise HTTPException(status_code=404, detail=f"Ticker '{ticker_clean}' could not be registered.")
@@ -463,6 +492,7 @@ async def get_company_financials(ticker: str, db: AsyncSession = Depends(get_db)
 @router.get("/{ticker}/prices", response_model=HistoricalPricesWrapper)
 async def get_company_prices(
     ticker: str,
+    background_tasks: BackgroundTasks,
     from_date: Optional[date] = Query(None, description="Start date filter (YYYY-MM-DD)"),
     to_date: Optional[date] = Query(None, description="End date filter (YYYY-MM-DD)"),
     db: AsyncSession = Depends(get_db)
@@ -487,24 +517,11 @@ async def get_company_prices(
     if not company:
         raise HTTPException(status_code=404, detail=f"Company with ticker '{ticker_clean}' not found.")
         
-    # Trigger dynamic live enrichment if prices are missing
+    # Trigger dynamic live enrichment in the background if prices are missing
     stmt_check_price = select(PriceHistory).where(PriceHistory.company_id == company.id).limit(1)
     has_price = (await db.execute(stmt_check_price)).scalar() is not None
     if not has_price:
-        from app.core.database import SessionLocal
-        from app.services.ingestion import IngestionService
-        import anyio
-        
-        def run_live_enrichment(t_clean: str):
-            sync_db = SessionLocal()
-            try:
-                comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
-                if comp:
-                    IngestionService.enrich_company_data_live(sync_db, comp)
-            finally:
-                sync_db.close()
-                
-        await anyio.to_thread.run_sync(run_live_enrichment, ticker_clean)
+        background_tasks.add_task(run_background_enrichment, company.ticker)
         
     query_stmt = select(PriceHistory).where(PriceHistory.company_id == company.id)
     

@@ -91,6 +91,16 @@ class IngestionService:
     """Routines to download, parse, and persist market data."""
 
     @staticmethod
+    def _get_yf_ticker(comp: Company) -> str:
+        """Resolve the correct yfinance ticker symbol based on the company's exchange or ticker suffix."""
+        exchange = (comp.exchange or "").upper()
+        if exchange in ("NSE", "NSI") or comp.ticker.endswith(".NS"):
+            return f"{comp.ticker}.NS" if not comp.ticker.endswith(".NS") else comp.ticker
+        elif exchange in ("BSE", "BOM") or comp.ticker.endswith(".BO"):
+            return f"{comp.ticker}.BO" if not comp.ticker.endswith(".BO") else comp.ticker
+        return comp.ticker
+
+    @staticmethod
     def ingest_company_master(db: Session) -> dict:
         """Downloads complete NSE list of active equities and upserts them into PostgreSQL."""
         url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
@@ -180,7 +190,7 @@ class IngestionService:
         logger.info(f"Enriching {len(companies)} company profiles from Yahoo Finance...")
         
         for comp in companies:
-            ticker_ns = f"{comp.ticker}.NS"
+            ticker_ns = IngestionService._get_yf_ticker(comp)
             try:
                 ticker = yf.Ticker(ticker_ns)
                 info = ticker.info
@@ -229,7 +239,7 @@ class IngestionService:
         candles_inserted = 0
         
         for idx, comp in enumerate(companies):
-            ticker_ns = f"{comp.ticker}.NS"
+            ticker_ns = IngestionService._get_yf_ticker(comp)
             
             # Check if this company already has price history
             has_history = db.query(PriceHistory).filter(PriceHistory.company_id == comp.id).first() is not None
@@ -561,7 +571,7 @@ class IngestionService:
     @staticmethod
     def _enrich_financials_from_yfinance(db: Session, comp: Company) -> None:
         """Fallback to Yahoo Finance for retrieving key annual and quarterly financial data points."""
-        ticker_ns = f"{comp.ticker}.NS" if comp.exchange == "NSE" else comp.ticker
+        ticker_ns = IngestionService._get_yf_ticker(comp)
         logger.info(f"Running Yahoo Finance financial fallback for {comp.ticker} using ticker symbol '{ticker_ns}'...")
         
         ticker = yf.Ticker(ticker_ns)
@@ -692,7 +702,7 @@ class IngestionService:
         
         # 1. Profile enrichment
         if comp.market_cap is None or comp.sector is None:
-            ticker_ns = f"{comp.ticker}.NS" if comp.exchange == "NSE" else comp.ticker
+            ticker_ns = IngestionService._get_yf_ticker(comp)
             try:
                 ticker = yf.Ticker(ticker_ns)
                 info = ticker.info
@@ -708,7 +718,7 @@ class IngestionService:
         # 2. Daily price ingestion (last 1 year)
         has_prices = db.query(PriceHistory).filter(PriceHistory.company_id == comp.id).first() is not None
         if not has_prices:
-            ticker_ns = f"{comp.ticker}.NS" if comp.exchange == "NSE" else comp.ticker
+            ticker_ns = IngestionService._get_yf_ticker(comp)
             try:
                 ticker = yf.Ticker(ticker_ns)
                 df = ticker.history(period="1y")

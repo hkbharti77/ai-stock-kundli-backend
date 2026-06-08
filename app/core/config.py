@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     DEEPSEEK_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
     GEMINI_API_KEY: str = ""
+    OLLAMA_API_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "gemma4:31b-cloud"
 
     # ── SMTP Email Server ───────────────────────────────────
     SMTP_HOST: str = "smtp.gmail.com"

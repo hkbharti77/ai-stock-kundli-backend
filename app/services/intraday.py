@@ -43,9 +43,9 @@ class IntradayService:
         Tries to use yfinance as a reliable out-of-the-box fallback.
         """
         ticker_symbol = company.ticker
-        if company.exchange == "NSE":
+        if company.exchange in ("NSE", "NSI"):
             ticker_symbol = f"{company.ticker}.NS"
-        elif company.exchange == "BSE":
+        elif company.exchange in ("BSE", "BOM"):
             ticker_symbol = f"{company.ticker}.BO"
 
         def _fetch():

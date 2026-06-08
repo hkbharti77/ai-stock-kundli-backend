@@ -65,6 +65,7 @@ class TokenResponse(BaseModel):
 class UserResponse(BaseModel):
     """Public user profile."""
     id: int
+    role: str
     email: str
     full_name: str | None
     phone: str | None

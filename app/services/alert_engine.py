@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 from app.models.alert_rule import AlertRule
 from app.models.alert_history import AlertHistory
 from app.models.company import Company
+from app.models.watchlist import Watchlist
+from app.models.user_event import UserEvent
 from app.core.websocket import manager
 
 logger = logging.getLogger("app.services.alert_engine")
@@ -59,6 +61,29 @@ class AlertEngine:
             if rule.muted_until and rule.muted_until > datetime.utcnow():
                 logger.info(f"[Alert Engine] Rule {rule.id} is muted for user {rule.user_id}. Skipping.")
                 continue
+
+            # ── Check Watchlist and Search/Visit Conditions ──
+            # Only trigger alert if user has visited/searched the stock OR has added it to watchlist
+            if company_id:
+                watchlist_exists = db.query(Watchlist).filter(
+                    Watchlist.user_id == rule.user_id,
+                    Watchlist.company_id == company_id
+                ).first() is not None
+
+                visited_exists = False
+                if company:
+                    events = db.query(UserEvent).filter(
+                        UserEvent.user_id == rule.user_id,
+                        UserEvent.event_name.in_(["view_stock", "search_stock"])
+                    ).all()
+                    for evt in events:
+                        if isinstance(evt.event_data, dict) and evt.event_data.get("ticker", "").strip().upper() == ticker:
+                            visited_exists = True
+                            break
+
+                if not (watchlist_exists or visited_exists):
+                    logger.info(f"[Alert Engine] Skipping alert for user {rule.user_id} and stock {ticker} as it's neither in watchlist nor visited/searched.")
+                    continue
 
             # Evaluate thresholds based on trigger type
             is_triggered = False

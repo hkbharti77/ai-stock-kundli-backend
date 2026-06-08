@@ -32,9 +32,9 @@ class NewsService:
         - Global stocks: TICKER (bare, e.g. MSFT, GOOGL)
         """
         exchange = (company.exchange or "").upper()
-        if exchange in ("NSE", "NSE/BSE", "NSE BSE"):
+        if exchange in ("NSE", "NSE/BSE", "NSE BSE", "NSI"):
             return f"{company.ticker}.NS"
-        elif exchange == "BSE":
+        elif exchange in ("BSE", "BOM"):
             return f"{company.ticker}.BO"
         else:
             # NASDAQ, NYSE, GLOBAL, etc. — use bare ticker

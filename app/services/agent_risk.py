@@ -79,7 +79,7 @@ class RiskAnalystAgent:
                     volatility = 22.5
         
         # 3. Check for Regulatory or Legal Alerts in News Table
-        is_global = company.exchange not in ["NSE", "BSE"]
+        is_global = (company.exchange or "").upper() not in ["NSE", "BSE", "NSI", "BOM"]
         regulator = "sec" if is_global else "sebi"
         legal_keywords = [regulator, "legal", "fraud", "scam", "lawsuit", "investigation", "litigation", "court", "complaint", "order", "audit"]
         news_records = db.query(NewsArticle).filter(NewsArticle.company_id == company.id).all()
@@ -101,7 +101,8 @@ class RiskAnalystAgent:
             "public_holding_pct": public_holding_pct,
             "debt_equity": debt_equity,
             "volatility_30d": volatility,
-            "has_legal_alerts": has_legal_alerts
+            "has_legal_alerts": has_legal_alerts,
+            "regulator_name": "SEBI" if not is_global else "SEC"
         }
 
         # 4. Generate Analysis using LLM Client

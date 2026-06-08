@@ -15,6 +15,7 @@ from app.api.v1.endpoints.advisor import router as advisor_router
 from app.api.v1.endpoints.backtest import router as backtest_router
 from app.api.v1.endpoints.developer import router as developer_router
 from app.api.v1.endpoints.admin import router as admin_router
+from app.api.v1.endpoints.query import router as query_router
 
 api_router = APIRouter(prefix="/api/v1")
 
@@ -30,6 +31,7 @@ api_router.include_router(advisor_router)
 api_router.include_router(backtest_router)
 api_router.include_router(developer_router)
 api_router.include_router(admin_router)
+api_router.include_router(query_router, prefix="/query", tags=["Query"])
 
 
 

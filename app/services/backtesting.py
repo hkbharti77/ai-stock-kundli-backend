@@ -58,6 +58,9 @@ class BacktestingEngine:
 
         sorted_dates = sorted(list(all_dates_set))
         
+        # Filter out companies with no price history to prevent KeyErrors and allocate capital correctly
+        companies = [comp for comp in companies if comp.id in company_prices]
+        
         # 2. Simulate historical signals (Buy/Sell/Hold) per stock dynamically
         # To make it realistic, we calculate technical indicators on a rolling basis
         signals: Dict[int, Dict[date, str]] = {}
