@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     ]
 
     # ── LLM APIs (Phase 2+) ─────────────────────────────────
+    # LLM_PROVIDER controls which backend is used first.
+    #   "ollama"  → local Ollama only (development)
+    #   "gemini"  → Gemini first, then waterfall (production)
+    #   "auto"    → full waterfall: DeepSeek → Gemini → OpenAI → Ollama
+    LLM_PROVIDER: str = "auto"
     DEEPSEEK_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
     GEMINI_API_KEY: str = ""

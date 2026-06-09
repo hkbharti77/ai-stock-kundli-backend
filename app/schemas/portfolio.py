@@ -1,16 +1,67 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from app.schemas.company import CompanyResponse
+
+# DB column is Numeric(12, 4) → max absolute value is 99,999,999.9999
+_MAX_SHARES = 99_999_999.0
+# DB column is Numeric(12, 2) → max absolute value is 9,999,999,999.99
+_MAX_PRICE  = 9_999_999_999.0
 
 class PortfolioHoldingCreate(BaseModel):
     ticker: str
     shares: float
     average_price: float
 
+    @field_validator("shares")
+    @classmethod
+    def validate_shares(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("Shares must be a positive number.")
+        if v > _MAX_SHARES:
+            raise ValueError(
+                f"Shares value {v:,.2f} exceeds the maximum allowed ({_MAX_SHARES:,.0f}). "
+                "Please enter a realistic quantity."
+            )
+        return v
+
+    @field_validator("average_price")
+    @classmethod
+    def validate_average_price(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("Average price must be a positive number.")
+        if v > _MAX_PRICE:
+            raise ValueError(
+                f"Price value {v:,.2f} exceeds the maximum allowed ({_MAX_PRICE:,.0f})."
+            )
+        return v
+
 class PortfolioHoldingUpdate(BaseModel):
     shares: float
     average_price: float
+
+    @field_validator("shares")
+    @classmethod
+    def validate_shares(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("Shares must be a positive number.")
+        if v > _MAX_SHARES:
+            raise ValueError(
+                f"Shares value {v:,.2f} exceeds the maximum allowed ({_MAX_SHARES:,.0f}). "
+                "Please enter a realistic quantity."
+            )
+        return v
+
+    @field_validator("average_price")
+    @classmethod
+    def validate_average_price(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("Average price must be a positive number.")
+        if v > _MAX_PRICE:
+            raise ValueError(
+                f"Price value {v:,.2f} exceeds the maximum allowed ({_MAX_PRICE:,.0f})."
+            )
+        return v
 
 class PortfolioHoldingResponse(BaseModel):
     id: int
@@ -65,6 +116,13 @@ class PortfolioAnalysisResponse(BaseModel):
 
 # --- Sprint 19-20 Position Sizing & Portfolio Builder Schemas ---
 
+_MAX_CAPITAL    = 1_000_000_000.0   # ₹100 Cr
+_MIN_CALC_CAP   = 1_000.0           # ₹1,000 (position sizing)
+_MIN_BUILD_CAP  = 10_000.0          # ₹10,000 (builder)
+_MAX_PRICE_VAL  = 100_000.0         # ₹1,00,000
+_VALID_PROFILES = {"conservative", "moderate", "aggressive"}
+_VALID_HORIZONS = {"Short-term", "Medium-term", "Long-term"}
+
 class PositionSizeRequest(BaseModel):
     ticker: str
     total_capital: float
@@ -72,6 +130,49 @@ class PositionSizeRequest(BaseModel):
     stop_loss_pct: float
     take_profit_pct: float
     manual_price: Optional[float] = None
+
+    @field_validator("total_capital")
+    @classmethod
+    def validate_capital(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("total_capital must be a positive number.")
+        if v < _MIN_CALC_CAP:
+            raise ValueError(f"Minimum capital is ₹{_MIN_CALC_CAP:,.0f}.")
+        if v > _MAX_CAPITAL:
+            raise ValueError(f"Maximum capital is ₹{_MAX_CAPITAL:,.0f} (₹100 Cr).")
+        return v
+
+    @field_validator("risk_profile")
+    @classmethod
+    def validate_risk_profile(cls, v: str) -> str:
+        if v.lower() not in _VALID_PROFILES:
+            raise ValueError(f"risk_profile must be one of: {', '.join(_VALID_PROFILES)}.")
+        return v.lower()
+
+    @field_validator("stop_loss_pct")
+    @classmethod
+    def validate_stop_loss(cls, v: float) -> float:
+        if v <= 0 or v > 50:
+            raise ValueError("stop_loss_pct must be between 0.1 and 50.")
+        return v
+
+    @field_validator("take_profit_pct")
+    @classmethod
+    def validate_take_profit(cls, v: float) -> float:
+        if v <= 0 or v > 500:
+            raise ValueError("take_profit_pct must be between 0.1 and 500.")
+        return v
+
+    @field_validator("manual_price")
+    @classmethod
+    def validate_manual_price(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None:
+            if v <= 0:
+                raise ValueError("manual_price must be a positive number.")
+            if v > _MAX_PRICE_VAL:
+                raise ValueError(f"manual_price cannot exceed ₹{_MAX_PRICE_VAL:,.0f}.")
+        return v
+
 
 class PositionSizeResponse(BaseModel):
     ticker: str
@@ -101,6 +202,31 @@ class PortfolioBuilderRequest(BaseModel):
     risk_profile: str  # conservative, moderate, aggressive
     horizon: str       # Short-term, Medium-term, Long-term
     preferences: Optional[List[str]] = None  # selected preferred sectors
+
+    @field_validator("total_capital")
+    @classmethod
+    def validate_capital(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("total_capital must be a positive number.")
+        if v < _MIN_BUILD_CAP:
+            raise ValueError(f"Minimum capital for portfolio builder is ₹{_MIN_BUILD_CAP:,.0f}.")
+        if v > _MAX_CAPITAL:
+            raise ValueError(f"Maximum capital is ₹{_MAX_CAPITAL:,.0f} (₹100 Cr).")
+        return v
+
+    @field_validator("risk_profile")
+    @classmethod
+    def validate_risk_profile(cls, v: str) -> str:
+        if v.lower() not in _VALID_PROFILES:
+            raise ValueError(f"risk_profile must be one of: {', '.join(_VALID_PROFILES)}.")
+        return v.lower()
+
+    @field_validator("horizon")
+    @classmethod
+    def validate_horizon(cls, v: str) -> str:
+        if v not in _VALID_HORIZONS:
+            raise ValueError(f"horizon must be one of: {', '.join(_VALID_HORIZONS)}.")
+        return v
 
 class BuilderHoldingRecommendation(BaseModel):
     ticker: str

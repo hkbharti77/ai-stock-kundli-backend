@@ -11,6 +11,7 @@ from sqlalchemy import (
     Text,
     ForeignKey,
     JSON,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
@@ -18,6 +19,9 @@ from app.core.database import Base
 
 class AgentOutput(Base):
     __tablename__ = "agent_outputs"
+    __table_args__ = (
+        UniqueConstraint("company_id", "agent_type", name="uq_agent_outputs_company_agent"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     company_id: Mapped[int] = mapped_column(

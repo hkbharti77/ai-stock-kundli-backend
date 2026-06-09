@@ -6,6 +6,7 @@ import smtplib
 import random
 import time
 import redis
+from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -535,3 +536,61 @@ async def reset_password(
     await db.commit()
 
     return MessageResponse(message="Password has been reset successfully. You may now log in.")
+
+
+# ── Daily Usage Endpoint ────────────────────────────────────
+
+@router.get(
+    "/me/usage",
+    summary="Get current user's daily Kundli usage count",
+)
+async def get_usage(
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return how many Kundli reports the user has consumed today, and their daily limit."""
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    plan = user.plan.lower()
+    if plan == "starter":
+        limit = 20
+    elif plan in ["pro", "advisor", "admin"]:
+        limit = -1  # Unlimited
+    else:  # free
+        limit = 3
+
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    limit_key = f"ratelimit:user:{user_id}:date:{today_str}"
+
+    used = 0
+
+    # Try async Redis via cache client first
+    try:
+        from app.core.cache import cache
+        redis_async = cache.client
+        if redis_async:
+            val = await redis_async.get(limit_key)
+            used = int(val) if val else 0
+        else:
+            raise Exception("No async Redis client")
+    except Exception:
+        # Fall back to sync redis_client in this module
+        if redis_client:
+            try:
+                val = redis_client.get(limit_key)
+                used = int(val) if val else 0
+            except Exception:
+                pass
+        else:
+            # Fall back to in-memory store from companies module
+            try:
+                from app.api.v1.endpoints.companies import local_rate_limit_store
+                used = local_rate_limit_store.get(limit_key, 0)
+            except Exception:
+                pass
+
+    return {"used": used, "limit": limit, "plan": plan}

@@ -10,18 +10,41 @@ from app.core.config import get_settings
 logger = logging.getLogger("LLMService")
 settings = get_settings()
 
+
+# ─── Provider chain definitions ───────────────────────────────────────────────
+# Each tuple is (provider_key, json_caller, text_caller)
+# The LLM_PROVIDER env var selects the ordering:
+#   "ollama"  → Ollama only  (local dev — no cloud calls made)
+#   "gemini"  → Gemini first, then OpenAI, then DeepSeek  (production default)
+#   "auto"    → full waterfall: DeepSeek → Gemini → OpenAI → Ollama
+
+_CHAIN_OLLAMA_ONLY  = ["ollama"]
+_CHAIN_GEMINI_FIRST = ["gemini", "openai", "deepseek", "ollama"]
+_CHAIN_AUTO         = ["deepseek", "gemini", "openai", "ollama"]
+
+
 class LLMService:
     @staticmethod
     def get_api_keys() -> Dict[str, Optional[str]]:
-        """
-        Retrieve API keys from settings.
-        """
         return {
             "deepseek": settings.DEEPSEEK_API_KEY or None,
-            "gemini": settings.GEMINI_API_KEY or None,
-            "openai": settings.OPENAI_API_KEY or None,
-            "ollama": settings.OLLAMA_API_URL or "http://localhost:11434" if settings.OLLAMA_MODEL or settings.OLLAMA_API_URL else None,
+            "gemini":   settings.GEMINI_API_KEY or None,
+            "openai":   settings.OPENAI_API_KEY or None,
+            "ollama":   settings.OLLAMA_API_URL or "http://localhost:11434",
         }
+
+    @staticmethod
+    def get_provider_chain() -> List[str]:
+        """
+        Returns the ordered list of providers to try based on LLM_PROVIDER env var.
+        """
+        provider = (settings.LLM_PROVIDER or "auto").strip().lower()
+        if provider == "ollama":
+            return _CHAIN_OLLAMA_ONLY
+        elif provider == "gemini":
+            return _CHAIN_GEMINI_FIRST
+        else:  # "auto" or anything unrecognised → full waterfall
+            return _CHAIN_AUTO
 
     @classmethod
     async def generate_fundamental_analysis(
@@ -32,57 +55,34 @@ class LLMService:
         financial_statements_summary: str
     ) -> Dict[str, Any]:
         """
-        Runs fundamental analysis via LLM chain (DeepSeek -> Gemini -> GPT-4o -> Simulation).
+        Runs fundamental analysis via the LLM provider chain defined by LLM_PROVIDER env var.
         """
         prompt = cls._build_fundamental_prompt(ticker, company_name, ratios, financial_statements_summary)
         keys = cls.get_api_keys()
+        chain = cls.get_provider_chain()
 
-        # 1. Try DeepSeek-V3 (Primary)
-        if keys["deepseek"]:
-            logger.info("Attempting DeepSeek-V3 fundamental analysis...")
+        logger.info(f"LLM_PROVIDER='{settings.LLM_PROVIDER}' → chain: {chain}")
+
+        for provider in chain:
+            if not keys.get(provider):
+                continue
+            logger.info(f"Attempting {provider} fundamental analysis...")
             try:
-                result = await cls._call_deepseek(prompt)
+                caller = {
+                    "deepseek": cls._call_deepseek,
+                    "gemini":   cls._call_gemini,
+                    "openai":   cls._call_openai,
+                    "ollama":   cls._call_ollama,
+                }[provider]
+                result = await caller(prompt)
                 if result:
-                    logger.info("DeepSeek-V3 analysis succeeded!")
+                    logger.info(f"{provider} fundamental analysis succeeded!")
                     return result
             except Exception as e:
-                logger.error(f"DeepSeek-V3 call failed: {str(e)}")
+                logger.error(f"{provider} call failed: {str(e)}")
 
-        # 2. Try Gemini (Secondary)
-        if keys["gemini"]:
-            logger.info("Attempting Gemini fundamental analysis...")
-            try:
-                result = await cls._call_gemini(prompt)
-                if result:
-                    logger.info("Gemini analysis succeeded!")
-                    return result
-            except Exception as e:
-                logger.error(f"Gemini call failed: {str(e)}")
-
-        # 3. Try OpenAI GPT-4o (Tertiary)
-        if keys["openai"]:
-            logger.info("Attempting OpenAI GPT-4o fundamental analysis...")
-            try:
-                result = await cls._call_openai(prompt)
-                if result:
-                    logger.info("OpenAI GPT-4o analysis succeeded!")
-                    return result
-            except Exception as e:
-                logger.error(f"OpenAI GPT-4o call failed: {str(e)}")
-
-        # 4. Try Ollama (Local LLM Fallback)
-        if keys["ollama"]:
-            logger.info("Attempting Ollama local fundamental analysis...")
-            try:
-                result = await cls._call_ollama(prompt)
-                if result:
-                    logger.info("Ollama local analysis succeeded!")
-                    return result
-            except Exception as e:
-                logger.error(f"Ollama local call failed: {str(e)}")
-
-        # 5. Fallback to Simulation Engine
-        logger.warning("No API keys succeeded or provided. Running Simulation Engine...")
+        # Final fallback — simulation engine (no LLM needed)
+        logger.warning("All LLM providers exhausted. Running Simulation Engine...")
         return cls._run_simulation_engine(ticker, company_name, ratios)
 
     @staticmethod
@@ -325,49 +325,29 @@ Do NOT include any markdown code fences around the JSON (e.g. do not write ```js
     @classmethod
     async def generate_text(cls, prompt: str) -> Optional[str]:
         """
-        Generates free-form text or report using LLM chain (DeepSeek -> Gemini -> GPT-4o -> Ollama).
+        Generates free-form text/report using the LLM provider chain defined by LLM_PROVIDER env var.
         """
         keys = cls.get_api_keys()
+        chain = cls.get_provider_chain()
 
-        # 1. Try DeepSeek-V3
-        if keys["deepseek"]:
-            logger.info("Attempting DeepSeek-V3 text generation...")
+        logger.info(f"LLM_PROVIDER='{settings.LLM_PROVIDER}' → chain: {chain}")
+
+        for provider in chain:
+            if not keys.get(provider):
+                continue
+            logger.info(f"Attempting {provider} text generation...")
             try:
-                result = await cls._call_deepseek_text(prompt)
+                caller = {
+                    "deepseek": cls._call_deepseek_text,
+                    "gemini":   cls._call_gemini_text,
+                    "openai":   cls._call_openai_text,
+                    "ollama":   cls._call_ollama_text,
+                }[provider]
+                result = await caller(prompt)
                 if result:
                     return result
             except Exception as e:
-                logger.error(f"DeepSeek-V3 text call failed: {str(e)}")
-
-        # 2. Try Gemini
-        if keys["gemini"]:
-            logger.info("Attempting Gemini text generation...")
-            try:
-                result = await cls._call_gemini_text(prompt)
-                if result:
-                    return result
-            except Exception as e:
-                logger.error(f"Gemini text call failed: {str(e)}")
-
-        # 3. Try OpenAI GPT-4o
-        if keys["openai"]:
-            logger.info("Attempting OpenAI GPT-4o text generation...")
-            try:
-                result = await cls._call_openai_text(prompt)
-                if result:
-                    return result
-            except Exception as e:
-                logger.error(f"OpenAI GPT-4o text call failed: {str(e)}")
-
-        # 4. Try Ollama (Local)
-        if keys["ollama"]:
-            logger.info("Attempting Ollama local text generation...")
-            try:
-                result = await cls._call_ollama_text(prompt)
-                if result:
-                    return result
-            except Exception as e:
-                logger.error(f"Ollama local text call failed: {str(e)}")
+                logger.error(f"{provider} text call failed: {str(e)}")
 
         return None
 
@@ -496,57 +476,33 @@ Overall, {ticker} exhibits a {"strong and robust" if score >= 75 else "healthy a
         summary: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Runs technical analysis via LLM chain (DeepSeek -> Gemini -> GPT-4o -> Simulation).
+        Runs technical analysis via the LLM provider chain defined by LLM_PROVIDER env var.
         """
         prompt = cls._build_technical_prompt(ticker, company_name, summary)
         keys = cls.get_api_keys()
+        chain = cls.get_provider_chain()
 
-        # 1. Try DeepSeek-V3 (Primary)
-        if keys["deepseek"]:
-            logger.info("Attempting DeepSeek-V3 technical analysis...")
+        logger.info(f"LLM_PROVIDER='{settings.LLM_PROVIDER}' → chain: {chain}")
+
+        for provider in chain:
+            if not keys.get(provider):
+                continue
+            logger.info(f"Attempting {provider} technical analysis...")
             try:
-                result = await cls._call_deepseek(prompt)
+                caller = {
+                    "deepseek": cls._call_deepseek,
+                    "gemini":   cls._call_gemini,
+                    "openai":   cls._call_openai,
+                    "ollama":   cls._call_ollama,
+                }[provider]
+                result = await caller(prompt)
                 if result:
-                    logger.info("DeepSeek-V3 technical analysis succeeded!")
+                    logger.info(f"{provider} technical analysis succeeded!")
                     return result
             except Exception as e:
-                logger.error(f"DeepSeek-V3 call failed: {str(e)}")
+                logger.error(f"{provider} technical call failed: {str(e)}")
 
-        # 2. Try Gemini (Secondary)
-        if keys["gemini"]:
-            logger.info("Attempting Gemini technical analysis...")
-            try:
-                result = await cls._call_gemini(prompt)
-                if result:
-                    logger.info("Gemini technical analysis succeeded!")
-                    return result
-            except Exception as e:
-                logger.error(f"Gemini call failed: {str(e)}")
-
-        # 3. Try OpenAI GPT-4o (Tertiary)
-        if keys["openai"]:
-            logger.info("Attempting OpenAI GPT-4o technical analysis...")
-            try:
-                result = await cls._call_openai(prompt)
-                if result:
-                    logger.info("OpenAI GPT-4o technical analysis succeeded!")
-                    return result
-            except Exception as e:
-                logger.error(f"OpenAI GPT-4o call failed: {str(e)}")
-
-        # 4. Try Ollama (Local LLM Fallback)
-        if keys["ollama"]:
-            logger.info("Attempting Ollama local technical analysis...")
-            try:
-                result = await cls._call_ollama(prompt)
-                if result:
-                    logger.info("Ollama local technical analysis succeeded!")
-                    return result
-            except Exception as e:
-                logger.error(f"Ollama local technical call failed: {str(e)}")
-
-        # 5. Fallback to Simulation Engine
-        logger.warning("No API keys succeeded or provided. Running Simulation Engine...")
+        logger.warning("All LLM providers exhausted. Running Technical Simulation Engine...")
         return cls._run_technical_simulation(ticker, company_name, summary)
 
     @staticmethod

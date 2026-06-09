@@ -50,8 +50,8 @@ class MacroAnalystAgent:
         stmt = select(AgentOutput).where(
             AgentOutput.company_id == company.id,
             AgentOutput.agent_type == "macro_analyst"
-        )
-        existing_output = db.execute(stmt).scalar_one_or_none()
+        ).order_by(AgentOutput.updated_at.desc()).limit(1)
+        existing_output = db.execute(stmt).scalars().first()
 
         score = int(analysis_data.get("score", 60))
         confidence = int(analysis_data.get("confidence", 92))

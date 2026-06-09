@@ -662,9 +662,9 @@ async def get_fundamental_analysis(
     stmt_agent = select(AgentOutput).where(
         AgentOutput.company_id == company.id,
         AgentOutput.agent_type == "fundamental_analyst"
-    )
+    ).order_by(AgentOutput.updated_at.desc()).limit(1)
     agent_res = await db.execute(stmt_agent)
-    agent_output = agent_res.scalar_one_or_none()
+    agent_output = agent_res.scalars().first()
     
     is_recent = False
     if agent_output:
@@ -734,9 +734,9 @@ async def get_technical_analysis(
     stmt_agent = select(AgentOutput).where(
         AgentOutput.company_id == company.id,
         AgentOutput.agent_type == "technical_analyst"
-    )
+    ).order_by(AgentOutput.updated_at.desc()).limit(1)
     agent_res = await db.execute(stmt_agent)
-    agent_output = agent_res.scalar_one_or_none()
+    agent_output = agent_res.scalars().first()
     
     is_recent = False
     if agent_output:
@@ -972,9 +972,9 @@ async def get_news_analysis(
     stmt_agent = select(AgentOutput).where(
         AgentOutput.company_id == company.id,
         AgentOutput.agent_type == "news_analyst"
-    )
+    ).order_by(AgentOutput.updated_at.desc()).limit(1)
     agent_res = await db.execute(stmt_agent)
-    agent_output = agent_res.scalar_one_or_none()
+    agent_output = agent_res.scalars().first()
 
     if agent_output:
         age_hours = (datetime.utcnow() - agent_output.updated_at).total_seconds() / 3600
@@ -1620,9 +1620,9 @@ async def get_sentiment_analysis(ticker: str, db: AsyncSession = Depends(get_db)
     stmt_agent = select(AgentOutput).where(
         AgentOutput.company_id == company.id,
         AgentOutput.agent_type == "sentiment_analyst"
-    )
+    ).order_by(AgentOutput.updated_at.desc()).limit(1)
     res_agent = await db.execute(stmt_agent)
-    agent_output = res_agent.scalar_one_or_none()
+    agent_output = res_agent.scalars().first()
     
     overall_score = 15.0
     trend = "stable"
