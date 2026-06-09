@@ -1,16 +1,29 @@
 """
 AI Stock Kundli — Main Application Entry Point
 FastAPI application with CORS, API routing, and startup events.
+
+IMPORTANT LEGAL NOTICE:
+This platform is for EDUCATIONAL AND RESEARCH PURPOSES ONLY.
+It is NOT registered with SEBI, SEC, FCA, or any financial regulator.
+All AI-generated data is NOT investment advice.
+Investments are at your own risk. You may lose money.
 """
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 from app.core.config import get_settings
 from app.api.v1.router import api_router
 
 settings = get_settings()
+
+# Short disclaimer injected into every API response header
+_DISCLAIMER_HEADER = (
+    "FOR RESEARCH USE ONLY. Not investment advice. "
+    "Not SEBI/SEC/FCA registered. Invest at your own risk."
+)
 
 if settings.SENTRY_DSN:
     import sentry_sdk
@@ -106,7 +119,11 @@ app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     description=(
-        "Enterprise-grade investment intelligence platform. "
+        "⚠️ FOR EDUCATIONAL AND RESEARCH USE ONLY — NOT INVESTMENT ADVICE. "
+        "This platform is NOT registered with SEBI, SEC, FCA, or any financial regulator. "
+        "All AI-generated data does NOT constitute personalized financial advice. "
+        "Investments are at your own risk. You may lose money.\n\n"
+        "Enterprise-grade AI research platform. "
         "Analyzes NSE/BSE-listed companies with multi-agent AI "
         "to produce explainable, multi-dimensional research reports."
     ),
@@ -123,6 +140,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Disclaimer Header Middleware ─────────────────────────────
+# Injects a legal disclaimer into every API response so that
+# third-party consumers and API clients always see the notice.
+@app.middleware("http")
+async def add_disclaimer_headers(request: Request, call_next) -> Response:
+    response = await call_next(request)
+    response.headers["X-Platform-Disclaimer"] = _DISCLAIMER_HEADER
+    response.headers["X-Not-Investment-Advice"] = "true"
+    response.headers["X-Educational-Use-Only"] = "true"
+    response.headers["X-Invest-At-Own-Risk"] = "true"
+    return response
 
 # ── Register API Routes ─────────────────────────────────────
 app.include_router(api_router)
