@@ -57,4 +57,9 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.ingestion_tasks.task_scrape_sebi_orders",
         "schedule": crontab(hour="8", minute="0"),
     },
+    # 6. Check and expire trials — Hourly
+    "expire-trials-hourly": {
+        "task": "app.tasks.ingestion_tasks.task_expire_trials",
+        "schedule": crontab(minute="0"),
+    },
 }

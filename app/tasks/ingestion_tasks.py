@@ -116,3 +116,48 @@ def task_ingest_macro_data(self):
         db.close()
         logger.error(f"Error in task_ingest_macro_data: {exc}")
         raise self.retry(exc=exc, countdown=300)
+
+
+@celery_app.task(name="app.tasks.ingestion_tasks.task_expire_trials", bind=True)
+def task_expire_trials(self):
+    """Runs every hour to check for and downgrade expired trials."""
+    logger.info("Executing Celery Task: task_expire_trials")
+    db = SessionLocal()
+    try:
+        from app.models.user import User
+        from datetime import datetime, timezone
+        
+        now = datetime.now(timezone.utc)
+        # Find users with expired trials
+        stmt = "SELECT id, email, plan FROM users WHERE trial_expires_at < :now AND subscription_status = 'trialing'"
+        res = db.execute(stmt, {"now": now}).fetchall()
+        
+        count = 0
+        for row in res:
+            user_id = row[0]
+            email = row[1]
+            
+            # Update user to standard
+            update_stmt = "UPDATE users SET plan = 'standard', subscription_status = 'active', trial_expires_at = NULL WHERE id = :uid"
+            db.execute(update_stmt, {"uid": user_id})
+            
+            # Clear rate limit caches
+            try:
+                from app.api.v1.endpoints.subscriptions import reset_user_rate_limits
+                import asyncio
+                asyncio.run(reset_user_rate_limits(user_id))
+            except Exception:
+                pass
+                
+            logger.info(f"Downgraded expired trial for user {email} (ID: {user_id}) to standard.")
+            count += 1
+            
+        db.commit()
+        db.close()
+        return {"expired_count": count}
+    except Exception as exc:
+        db.rollback()
+        db.close()
+        logger.error(f"Error in task_expire_trials: {exc}")
+        raise self.retry(exc=exc, countdown=300)
+

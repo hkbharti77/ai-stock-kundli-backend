@@ -4,13 +4,15 @@ Watchlist Endpoints — CRUD APIs for users to save and track preferred companie
 
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import get_current_user_id
 from app.models.company import Company
 from app.models.watchlist import Watchlist
+from app.models.user import User
+from app.core.plans import get_effective_plan
 from app.schemas.watchlist import WatchlistCreate, WatchlistResponse
 
 logger = logging.getLogger("app.api.watchlist")
@@ -92,6 +94,28 @@ async def add_to_watchlist(
     if existing_item:
         # Already exists, just return it
         return existing_item
+
+    # Check Plan Limits
+    user_stmt = select(User).where(User.id == user_id)
+    user_res = await db.execute(user_stmt)
+    user = user_res.scalar_one_or_none()
+    
+    if user:
+        plan = get_effective_plan(user)
+        if plan in ["free", "standard"]:
+            count_stmt = select(func.count(Watchlist.id)).where(Watchlist.user_id == user_id)
+            current_count = await db.scalar(count_stmt)
+            
+            if plan == "free" and current_count >= 5:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN, 
+                    detail="Free plan is limited to 5 watchlist items. Please upgrade to Standard or Pro."
+                )
+            elif plan == "standard" and current_count >= 20:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN, 
+                    detail="Standard plan is limited to 20 watchlist items. Please upgrade to Pro."
+                )
 
     try:
         # 3. Create watchlist entry

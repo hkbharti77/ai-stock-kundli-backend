@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
@@ -12,6 +12,8 @@ from app.models.alert_rule import AlertRule
 from app.models.alert_history import AlertHistory
 from app.models.watchlist import Watchlist
 from app.models.user_event import UserEvent
+from app.models.user import User
+from app.core.plans import get_effective_plan
 from app.core.websocket import manager
 
 router = APIRouter()
@@ -62,6 +64,21 @@ async def get_alert_rules(user_id: int = Depends(get_current_user_id), db: Async
 async def create_alert_rule(rule_in: AlertRuleCreate, user_id: int = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
     """Creates a new alert rule."""
     company_id = None
+    
+    user_stmt = select(User).where(User.id == user_id)
+    user_res = await db.execute(user_stmt)
+    user = user_res.scalar_one_or_none()
+    
+    if user:
+        plan = get_effective_plan(user)
+        if plan == "free":
+            raise HTTPException(status_code=403, detail="Free plan does not support Price Alerts. Please upgrade.")
+        elif plan == "standard":
+            count_stmt = select(func.count(AlertRule.id)).where(AlertRule.user_id == user_id)
+            current_count = await db.scalar(count_stmt)
+            if current_count >= 3:
+                raise HTTPException(status_code=403, detail="Standard plan is limited to 3 active alerts. Please upgrade to Pro.")
+                
     if rule_in.ticker:
         stmt = select(Company).where(Company.ticker == rule_in.ticker.strip().upper())
         res = await db.execute(stmt)

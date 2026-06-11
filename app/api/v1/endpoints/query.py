@@ -9,9 +9,16 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import anyio
 
-from app.core.database import SessionLocal
+from app.core.database import SessionLocal, get_db
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from app.services.query_engine import QueryEngine
 from app.services.embedding_service import EmbeddingService
+from app.core.security import get_current_user_id
+from app.models.user import User
+from app.core.plans import get_effective_plan
+from app.core.cache import cache
+from datetime import datetime
 
 logger = logging.getLogger("app.api.query")
 router = APIRouter()
@@ -53,11 +60,36 @@ class IndexStatusResponse(BaseModel):
 async def chat_query(
     request: ChatRequest,
     background_tasks: BackgroundTasks,
+    user_id: int = Depends(get_current_user_id),
+    async_db: AsyncSession = Depends(get_db),
     db=Depends(get_sync_db)
 ):
     """
     Process natural language financial query using conversation history and RAG pipeline.
     """
+    # Check Plan Limits
+    user_stmt = select(User).where(User.id == user_id)
+    user_res = await async_db.execute(user_stmt)
+    user = user_res.scalar_one_or_none()
+    
+    if user:
+        plan = get_effective_plan(user)
+        if plan == "free":
+            raise HTTPException(status_code=403, detail="Free plan does not support AI Chat Queries. Please upgrade.")
+        elif plan == "standard":
+            today_str = datetime.utcnow().strftime("%Y-%m-%d")
+            rate_limit_key = f"chat_limit:{user_id}:{today_str}"
+            try:
+                current_usage = await cache.client.incr(rate_limit_key)
+                if current_usage == 1:
+                    await cache.client.expire(rate_limit_key, 86400) # 24 hours
+                if current_usage > 10:
+                    raise HTTPException(status_code=429, detail="Standard plan is limited to 10 queries per day. Please upgrade to Pro for unlimited access.")
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Error checking chat rate limit: {e}")
+
     try:
         # Convert Pydantic history objects to plain dicts
         history_dicts = [{"role": m.role, "content": m.content} for m in request.history]

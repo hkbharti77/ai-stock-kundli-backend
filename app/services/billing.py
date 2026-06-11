@@ -74,12 +74,8 @@ class BillingService:
             return None  # No invoice for free plan
             
         # Standard flat monthly rates
-        plan_costs = {
-            "starter": 299.0,
-            "pro": 999.0,
-            "advisor": 2499.0
-        }
-        cost = plan_costs.get(plan_lower, 0.0)
+        from app.core.plans import PLAN_PRICES_INR
+        cost = PLAN_PRICES_INR.get(plan_lower, 0.0)
         if cost == 0.0:
             return None
             

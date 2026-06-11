@@ -78,3 +78,14 @@ class KundliReportResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class PartialKundliReportResponse(BaseModel):
+    """Partial Kundli Report for Standard/Free tier users."""
+    overall_score: Optional[int] = None
+    signal: Optional[str] = None
+    strengths: List[str] = []
+    risks: List[str] = []
+    locked_sections: List[str] = []
+    upgrade_required: bool = True
+    message: str

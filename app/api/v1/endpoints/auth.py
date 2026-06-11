@@ -6,7 +6,7 @@ import smtplib
 import random
 import time
 import redis
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -66,48 +66,36 @@ def send_otp_email(to_email: str, otp_code: str):
         print(f"[MOCK SMTP] SMTP not configured. OTP for {to_email} is {otp_code}")
         return
 
+    from app.core.email import get_master_email_template
+
+    subject = f"{otp_code} is your AI Stock Kundli Verification Code"
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"{otp_code} is your AI Stock Kundli Verification Code"
+    msg["Subject"] = subject
     msg["From"] = f"AI Stock Kundli <{settings.SMTP_USERNAME}>"
     msg["To"] = to_email
 
-    html_content = f"""
-    <html>
-      <body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #0b0f19; color: #f3f4f6; padding: 20px; margin: 0;">
-        <table align="center" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 600px; background: #111827; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5); overflow: hidden;">
-          <tr>
-            <td style="padding: 40px 30px; text-align: center; background: linear-gradient(135deg, #1e1b4b 0%, #111827 100%); border-bottom: 1px solid rgba(255, 255, 255, 0.05);">
-              <h1 style="color: #818cf8; margin: 0; font-size: 28px; font-weight: bold; letter-spacing: 1px;">AI Stock Kundli</h1>
-              <p style="color: #9ca3af; margin: 5px 0 0 0; font-size: 14px; font-weight: 500;">Secure Compliance Registration</p>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding: 40px 30px; color: #e5e7eb;">
-              <p style="font-size: 16px; margin: 0 0 16px 0; font-weight: 500;">Hello,</p>
-              <p style="font-size: 15px; line-height: 1.6; margin: 0 0 24px 0; color: #d1d5db;">Thank you for taking the first step to securing your premium research dashboard. Please use the secure verification code below to verify your email address:</p>
-              
-              <table align="center" border="0" cellpadding="0" cellspacing="0" style="margin: 30px auto;">
-                <tr>
-                  <td style="background: rgba(99, 102, 241, 0.15); border: 1px solid #6366f1; color: #818cf8; font-size: 32px; font-weight: bold; letter-spacing: 6px; padding: 14px 35px; border-radius: 8px; font-family: 'Courier New', Courier, monospace; text-align: center;">
-                    {otp_code}
-                  </td>
-                </tr>
-              </table>
-              
-              <p style="font-size: 14px; line-height: 1.5; color: #9ca3af; margin: 24px 0 0 0;">This OTP code is valid for <strong>5 minutes</strong>. If you did not request this verification, please safely ignore this email.</p>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding: 25px 30px; background: #0f172a; border-top: 1px solid rgba(255, 255, 255, 0.05); font-size: 11px; color: #6b7280; text-align: center; line-height: 1.6;">
-              <p style="margin: 0 0 8px 0;">SEBI Research Analyst Compliance: This platform provides research-driven insights and AI models for informational purposes, not personalized investment advice.</p>
-              <p style="margin: 0;">&copy; {time.strftime('%Y')} AI Stock Kundli. All rights reserved.</p>
-            </td>
-          </tr>
-        </table>
-      </body>
-    </html>
+    text_content = f"Your verification code is {otp_code}. It is valid for 5 minutes."
+
+    html_body = f"""
+    <h2 style="margin-top: 0; color: #E2E8F0; font-size: 20px;">Secure Compliance Registration</h2>
+    <p>Hello,</p>
+    <p>Thank you for taking the first step to securing your premium research dashboard. Please use the secure verification code below to verify your email address:</p>
+    
+    <table align="center" border="0" cellpadding="0" cellspacing="0" style="margin: 30px auto;">
+      <tr>
+        <td style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3B82F6; color: #3B82F6; font-size: 32px; font-weight: bold; letter-spacing: 6px; padding: 14px 35px; border-radius: 8px; font-family: 'Courier New', Courier, monospace; text-align: center;">
+          {otp_code}
+        </td>
+      </tr>
+    </table>
+    
+    <p style="font-size: 14px; line-height: 1.5; color: #94A3B8; margin: 24px 0 0 0;">This OTP code is valid for <strong>5 minutes</strong>. If you did not request this verification, please safely ignore this email.</p>
     """
-    msg.attach(MIMEText(html_content, "html"))
+    
+    full_html = get_master_email_template(subject, html_body)
+
+    msg.attach(MIMEText(text_content, "plain"))
+    msg.attach(MIMEText(full_html, "html"))
 
     try:
         with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
@@ -128,48 +116,36 @@ def _send_reset_otp_email(to_email: str, otp_code: str):
         print(f"[MOCK SMTP] Password reset OTP for {to_email}: {otp_code}")
         return
 
+    from app.core.email import get_master_email_template
+
+    subject = f"{otp_code} — AI Stock Kundli Password Reset"
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"{otp_code} — AI Stock Kundli Password Reset"
+    msg["Subject"] = subject
     msg["From"] = f"AI Stock Kundli <{settings.SMTP_USERNAME}>"
     msg["To"] = to_email
 
-    html_content = f"""
-    <html>
-      <body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #0b0f19; color: #f3f4f6; padding: 20px; margin: 0;">
-        <table align="center" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 600px; background: #111827; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5); overflow: hidden;">
-          <tr>
-            <td style="padding: 40px 30px; text-align: center; background: linear-gradient(135deg, #1e1b4b 0%, #111827 100%); border-bottom: 1px solid rgba(255, 255, 255, 0.05);">
-              <h1 style="color: #f59e0b; margin: 0; font-size: 28px; font-weight: bold; letter-spacing: 1px;">🔐 Password Reset</h1>
-              <p style="color: #9ca3af; margin: 5px 0 0 0; font-size: 14px; font-weight: 500;">AI Stock Kundli — Secure Account Recovery</p>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding: 40px 30px; color: #e5e7eb;">
-              <p style="font-size: 16px; margin: 0 0 16px 0; font-weight: 500;">Hello,</p>
-              <p style="font-size: 15px; line-height: 1.6; margin: 0 0 24px 0; color: #d1d5db;">We received a request to reset your AI Stock Kundli account password. Use the secure code below to proceed:</p>
-              
-              <table align="center" border="0" cellpadding="0" cellspacing="0" style="margin: 30px auto;">
-                <tr>
-                  <td style="background: rgba(245, 158, 11, 0.12); border: 1px solid #f59e0b; color: #fbbf24; font-size: 32px; font-weight: bold; letter-spacing: 6px; padding: 14px 35px; border-radius: 8px; font-family: 'Courier New', Courier, monospace; text-align: center;">
-                    {otp_code}
-                  </td>
-                </tr>
-              </table>
-              
-              <p style="font-size: 14px; line-height: 1.5; color: #9ca3af; margin: 24px 0 0 0;">This code expires in <strong>5 minutes</strong>. If you did not request a password reset, please ignore this email — your account is safe.</p>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding: 25px 30px; background: #0f172a; border-top: 1px solid rgba(255, 255, 255, 0.05); font-size: 11px; color: #6b7280; text-align: center; line-height: 1.6;">
-              <p style="margin: 0 0 8px 0;">SEBI Research Analyst Compliance: This platform provides research-driven insights and AI models for informational purposes, not personalized investment advice.</p>
-              <p style="margin: 0;">&copy; {time.strftime('%Y')} AI Stock Kundli. All rights reserved.</p>
-            </td>
-          </tr>
-        </table>
-      </body>
-    </html>
+    text_content = f"Your password reset code is {otp_code}. It is valid for 5 minutes."
+
+    html_body = f"""
+    <h2 style="margin-top: 0; color: #F59E0B; font-size: 20px;">🔐 Password Reset</h2>
+    <p>Hello,</p>
+    <p>We received a request to reset your AI Stock Kundli account password. Use the secure code below to proceed:</p>
+    
+    <table align="center" border="0" cellpadding="0" cellspacing="0" style="margin: 30px auto;">
+      <tr>
+        <td style="background: rgba(245, 158, 11, 0.12); border: 1px solid #F59E0B; color: #F59E0B; font-size: 32px; font-weight: bold; letter-spacing: 6px; padding: 14px 35px; border-radius: 8px; font-family: 'Courier New', Courier, monospace; text-align: center;">
+          {otp_code}
+        </td>
+      </tr>
+    </table>
+    
+    <p style="font-size: 14px; line-height: 1.5; color: #94A3B8; margin: 24px 0 0 0;">This code expires in <strong>5 minutes</strong>. If you did not request a password reset, please ignore this email — your account is safe.</p>
     """
-    msg.attach(MIMEText(html_content, "html"))
+    
+    full_html = get_master_email_template(subject, html_body)
+
+    msg.attach(MIMEText(text_content, "plain"))
+    msg.attach(MIMEText(full_html, "html"))
 
     try:
         with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
@@ -352,6 +328,29 @@ async def refresh_token(payload: TokenRefresh):
     )
 
 
+async def check_trial_eligibility(user: User, db: AsyncSession) -> bool:
+    """Check if user or any associated accounts have used a trial in the last 90 days."""
+    conditions = [User.email == user.email]
+    if user.phone:
+        conditions.append(User.phone == user.phone)
+        
+    from sqlalchemy import or_
+    result = await db.execute(select(User).where(or_(*conditions)))
+    associated_users = result.scalars().all()
+    
+    for u in associated_users:
+        if u.trial_used or u.plan in ["pro", "pro_trial"]:
+            # Check if their last subscription or trial expired > 90 days ago
+            last_active = u.subscription_ends_at or u.trial_expires_at
+            if last_active:
+                if datetime.utcnow() - last_active <= timedelta(days=90):
+                    return False
+            else:
+                # Used trial/plan but no expiry (meaning it's active or corrupted)
+                return False
+                
+    return True
+
 @router.get(
     "/me",
     response_model=UserResponse,
@@ -371,7 +370,11 @@ async def get_me(
             detail="User not found",
         )
 
-    return user
+    # Compute dynamic trial eligibility
+    user_data = user.__dict__.copy()
+    user_data["can_use_trial"] = await check_trial_eligibility(user, db)
+
+    return user_data
 
 
 @router.put(
@@ -402,7 +405,11 @@ async def update_profile(
     await db.commit()
     await db.refresh(user)
     
-    return user
+    # Compute dynamic trial eligibility
+    user_data = user.__dict__.copy()
+    user_data["can_use_trial"] = await check_trial_eligibility(user, db)
+
+    return user_data
 
 
 # ── Password Reset via Email OTP ────────────────────────────────
@@ -556,7 +563,7 @@ async def get_usage(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
     plan = user.plan.lower()
-    if plan == "starter":
+    if plan == "standard" or plan == "starter":
         limit = 20
     elif plan in ["pro", "advisor", "admin"]:
         limit = -1  # Unlimited

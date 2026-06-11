@@ -101,6 +101,15 @@ class UserResponse(BaseModel):
     plan: str
     is_verified: bool
     created_at: datetime
+    
+    subscription_status: str | None
+    subscription_started_at: datetime | None
+    subscription_ends_at: datetime | None
+    provider_subscription_id: str | None
+    trial_used: bool
+    trial_expires_at: datetime | None
+    
+    can_use_trial: bool = True
 
     class Config:
         from_attributes = True

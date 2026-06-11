@@ -16,8 +16,12 @@ from fastapi.responses import Response
 
 from app.core.config import get_settings
 from app.api.v1.router import api_router
+from app.core.logging_config import setup_logging
 
 settings = get_settings()
+
+# Setup file logging (all, error, warning, success)
+setup_logging()
 
 # Short disclaimer injected into every API response header
 _DISCLAIMER_HEADER = (
@@ -69,6 +73,21 @@ async def lifespan(app: FastAPI):
                     conn.execute(text("ALTER TABLE users ADD COLUMN is_suspended BOOLEAN DEFAULT FALSE"))
                     print("[STARTUP] Added is_suspended column to users table.")
                 
+                # Subscription Lifecycle Columns
+                if "subscription_status" not in cols_users:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN subscription_status VARCHAR(50)"))
+                if "subscription_started_at" not in cols_users:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN subscription_started_at TIMESTAMP"))
+                if "subscription_ends_at" not in cols_users:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN subscription_ends_at TIMESTAMP"))
+                if "provider_subscription_id" not in cols_users:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN provider_subscription_id VARCHAR(255)"))
+                if "trial_used" not in cols_users:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN trial_used BOOLEAN DEFAULT FALSE"))
+                if "trial_expires_at" not in cols_users:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN trial_expires_at TIMESTAMP"))
+                
+
                 # api_keys table
                 res_keys = conn.execute(
                     text("SELECT column_name FROM information_schema.columns WHERE table_name = 'api_keys'")

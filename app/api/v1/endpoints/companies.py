@@ -2,9 +2,9 @@
 FastAPI Routes — Exposing high-performance company and market data APIs with Async SQLAlchemy.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import logging
-from typing import Optional
+from typing import Optional, Union
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy import case, or_, desc, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,7 +21,7 @@ from app.schemas.price_history import HistoricalPricesWrapper, PriceHistoryRespo
 from app.schemas.agent_output import AgentOutputResponse
 from app.schemas.technical_analysis import TechnicalIndicatorsWrapper
 from app.schemas.news import NewsListResponse, NewsAnalysisResponse
-from app.schemas.kundli_report import KundliReportResponse
+from app.schemas.kundli_report import KundliReportResponse, PartialKundliReportResponse
 from app.services.agent_fundamental import FundamentalAnalystAgent
 from app.services.agent_technical import TechnicalAnalystAgent
 from app.services.agent_news import NewsAnalystAgent
@@ -33,7 +33,9 @@ from app.services.agent_aggregator import AggregatorAgent
 
 from app.models.news_article import NewsArticle
 from app.models.user import User
-from app.core.security import get_optional_user_id
+from app.core.security import get_current_user_id, get_optional_user_id
+from app.core.feature_guard import get_user_plan, require_feature
+from app.core.plans import has_feature, get_effective_plan
 from fastapi import Request
 
 local_rate_limit_store: dict[str, int] = {}
@@ -485,7 +487,11 @@ async def get_company_profile(ticker: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{ticker}/financials", response_model=CompanyFinancialsWrapper)
-async def get_company_financials(ticker: str, db: AsyncSession = Depends(get_db)):
+async def get_company_financials(
+    ticker: str, 
+    user_id: Optional[int] = Depends(get_optional_user_id),
+    db: AsyncSession = Depends(get_db)
+):
     """
     Get 10-year annual and quarterly financials for a company. Caches for 1 day.
     """
@@ -540,6 +546,20 @@ async def get_company_financials(ticker: str, db: AsyncSession = Depends(get_db)
     res_q = await db.execute(stmt_q)
     quarterly_stmts = res_q.scalars().all()
     
+    # Enforce Free Tier Limits (2 years max)
+    plan = "free"
+    if user_id:
+        user_stmt = select(User).where(User.id == user_id)
+        user = (await db.execute(user_stmt)).scalar_one_or_none()
+        if user:
+            plan = get_effective_plan(user)
+            
+    if plan == "free":
+        if len(annual_stmts) > 2:
+            annual_stmts = annual_stmts[-2:]
+        if len(quarterly_stmts) > 8:
+            quarterly_stmts = quarterly_stmts[-8:]
+    
     payload = {
         "ticker": ticker_clean,
         "annual": [FinancialResponse.from_orm(f) for f in annual_stmts],
@@ -557,6 +577,7 @@ async def get_company_prices(
     background_tasks: BackgroundTasks,
     from_date: Optional[date] = Query(None, description="Start date filter (YYYY-MM-DD)"),
     to_date: Optional[date] = Query(None, description="End date filter (YYYY-MM-DD)"),
+    user_id: Optional[int] = Depends(get_optional_user_id),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -585,6 +606,19 @@ async def get_company_prices(
     if not has_price:
         background_tasks.add_task(run_background_enrichment, company.ticker)
         
+    # Check Plan & Enforce 1-year limit for Free
+    plan = "free"
+    if user_id:
+        user_stmt = select(User).where(User.id == user_id)
+        user = (await db.execute(user_stmt)).scalar_one_or_none()
+        if user:
+            plan = get_effective_plan(user)
+            
+    if plan == "free":
+        one_year_ago = (datetime.utcnow() - timedelta(days=365)).date()
+        if from_date is None or from_date < one_year_ago:
+            from_date = one_year_ago
+
     query_stmt = select(PriceHistory).where(PriceHistory.company_id == company.id)
     
     if from_date:
@@ -640,7 +674,8 @@ async def get_company_prices(
 async def get_fundamental_analysis(
     ticker: str,
     db: AsyncSession = Depends(get_db)
-):
+,
+    _: str = Depends(require_feature('fundamental_analysis'))):
     """
     Retrieves or triggers fundamental analyst agent report.
     Caches results in database agent_outputs table and returns the analysis.
@@ -711,7 +746,8 @@ async def get_fundamental_analysis(
 async def get_technical_analysis(
     ticker: str,
     db: AsyncSession = Depends(get_db)
-):
+,
+    _: str = Depends(require_feature('technical_analysis'))):
     """
     Retrieves or triggers technical analyst agent report.
     Caches results in database agent_outputs table and returns the analysis.
@@ -784,7 +820,8 @@ async def get_technical_analysis(
 async def get_technical_indicators(
     ticker: str,
     db: AsyncSession = Depends(get_db)
-):
+,
+    _: str = Depends(require_feature('technical_analysis'))):
     """
     Get daily price history enriched with computed indicators (SMA, EMA, VWAP, Bollinger, ATR, RSI, MACD, Volume Spikes, and Relative Strength ratios).
     Caches for 1 hour.
@@ -952,7 +989,8 @@ async def get_company_news(
 async def get_news_analysis(
     ticker: str,
     db: AsyncSession = Depends(get_db)
-):
+,
+    _: str = Depends(require_feature('news_analysis'))):
     """
     Retrieve or trigger the News Analyst Agent report for a company.
     Caches in agent_outputs for up to 4 hours.
@@ -1046,281 +1084,293 @@ async def get_news_analysis(
     }
 
 
-@router.get("/{ticker}/kundli-report", response_model=KundliReportResponse)
+@router.get("/{ticker}/kundli-report", response_model=Union[KundliReportResponse, PartialKundliReportResponse])
 async def get_kundli_report(
     ticker: str,
     request: Request,
     lang: str = "en",
     db: AsyncSession = Depends(get_db),
-    user_id: Optional[int] = Depends(get_optional_user_id),
+    user_plan: str = Depends(get_user_plan(require_auth=True)),
+    user_id: int = Depends(get_current_user_id),
 ):
     """
     Sprint 6 — Aggregated multi-agent Kundli Report.
     Combines Fundamental (55%), Technical (25%), and News (20%) agent scores
     into a single weighted Kundli signal with explainable report.
     Caches for 4 hours.
+    Free     -> 403 Forbidden
+    Standard -> Partial Report (basic_kundli)
+    Pro      -> Full Report
     """
     ticker_clean = ticker.strip().upper()
 
-    # ── Rate Limiting & Gating ──────────────────────────────────────────
-    today_str = datetime.utcnow().strftime("%Y-%m-%d")
-    limit = 1  # Unauthenticated
-    limit_key = f"ratelimit:ip:{request.client.host if request.client else 'unknown'}:date:{today_str}"
+    # 1. Feature Guard
+    from app.core.plans import has_feature, get_upgrade_message, STANDARD_LOCKED_SECTIONS
     
-    if user_id:
-        user_stmt = select(User).where(User.id == user_id)
-        user_res = await db.execute(user_stmt)
-        user = user_res.scalar_one_or_none()
-        if user:
-            plan = user.plan.lower()
-            if plan == "starter":
-                limit = 20
-            elif plan in ["pro", "advisor", "admin"]:
-                limit = 999999
-            else:  # free
-                limit = 3
-            limit_key = f"ratelimit:user:{user_id}:date:{today_str}"
-
-    redis_client = None
-    try:
-        redis_client = cache.client
-    except Exception:
-        pass
-
-    current_usage = 0
-    if redis_client:
-        try:
-            val = await redis_client.get(limit_key)
-            current_usage = int(val) if val else 0
-        except Exception:
-            pass
-    else:
-        current_usage = local_rate_limit_store.get(limit_key, 0)
-
-    if current_usage >= limit:
+    # If Free plan (doesn't even have basic_kundli), reject outright
+    if not has_feature(user_plan, "basic_kundli"):
         raise HTTPException(
-            status_code=429,
-            detail=f"Rate limit exceeded. Your plan limit is {limit} reports/day. Please upgrade your subscription."
+            status_code=403,
+            detail={
+                "error": "feature_locked",
+                "feature": "full_kundli",
+                "current_plan": user_plan,
+                "upgrade_required": True,
+                "message": get_upgrade_message("full_kundli", user_plan)
+            }
         )
 
-    # Increment usage count
-    if redis_client:
-        try:
-            pipe = redis_client.pipeline()
-            await pipe.incr(limit_key)
-            await pipe.expire(limit_key, 86400)
-            await pipe.execute()
-        except Exception:
-            pass
+    # Rate Limit Enforcement
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    limit_key = f"ratelimit:user:{user_id}:date:{today_str}"
+    
+    plan_lower = user_plan.lower()
+    if plan_lower in ["standard", "starter"]:
+        limit = 20
+    elif plan_lower in ["pro", "advisor", "admin"]:
+        limit = -1
     else:
-        local_rate_limit_store[limit_key] = current_usage + 1
-    # ──────────────────────────────────────────────────────────────────
+        limit = 3
+
+    used = 0
+    redis_async = cache.client
+    if redis_async:
+        val = await redis_async.get(limit_key)
+        used = int(val) if val else 0
+    else:
+        used = local_rate_limit_store.get(limit_key, 0)
+        
+    if limit != -1 and used >= limit:
+        raise HTTPException(
+            status_code=429, 
+            detail=f"Daily Kundli limit ({limit}) reached for your {user_plan} plan. Please upgrade for unlimited access."
+        )
+
+    # Increment usage
+    if redis_async:
+        await redis_async.incr(limit_key)
+        await redis_async.expire(limit_key, 86400)
+    else:
+        local_rate_limit_store[limit_key] = used + 1
 
     cache_key = f"company:kundli_report:{ticker_clean}:{lang.lower()}"
-
 
     cached = await cache.get(cache_key)
     if cached:
         cached["cached"] = True
-        return cached
+        report_dict = cached
+    else:
+        # Fetch company
+        stmt = select(Company).where(
+            Company.ticker == ticker_clean,
+            Company.is_active == True,
+        )
+        result = await db.execute(stmt)
+        company = result.scalar_one_or_none()
+        if not company:
+            raise HTTPException(status_code=404, detail=f"Company '{ticker_clean}' not found.")
 
-    # Fetch company
-    stmt = select(Company).where(
-        Company.ticker == ticker_clean,
-        Company.is_active == True,
-    )
-    result = await db.execute(stmt)
-    company = result.scalar_one_or_none()
-    if not company:
-        raise HTTPException(status_code=404, detail=f"Company '{ticker_clean}' not found.")
+        # ── Check for Missing / Stale Agent Outputs ──────────────────────
+        stmt_agents = select(AgentOutput).where(AgentOutput.company_id == company.id)
+        agents_res = await db.execute(stmt_agents)
+        existing_outputs = agents_res.scalars().all()
+        agent_map = {o.agent_type: o for o in existing_outputs}
 
-    # ── Check for Missing / Stale Agent Outputs ──────────────────────
-    stmt_agents = select(AgentOutput).where(AgentOutput.company_id == company.id)
-    agents_res = await db.execute(stmt_agents)
-    existing_outputs = agents_res.scalars().all()
-    agent_map = {o.agent_type: o for o in existing_outputs}
+        need_fundamental = True
+        if "fundamental_analyst" in agent_map:
+            age_days = (datetime.utcnow() - agent_map["fundamental_analyst"].updated_at).days
+            if age_days < 7:
+                need_fundamental = False
 
-    need_fundamental = True
-    if "fundamental_analyst" in agent_map:
-        age_days = (datetime.utcnow() - agent_map["fundamental_analyst"].updated_at).days
-        if age_days < 7:
-            need_fundamental = False
+        need_technical = True
+        if "technical_analyst" in agent_map:
+            age_days = (datetime.utcnow() - agent_map["technical_analyst"].updated_at).days
+            if age_days < 1:
+                need_technical = False
 
-    need_technical = True
-    if "technical_analyst" in agent_map:
-        age_days = (datetime.utcnow() - agent_map["technical_analyst"].updated_at).days
-        if age_days < 1:
-            need_technical = False
+        need_news = True
+        if "news_analyst" in agent_map:
+            age_hours = (datetime.utcnow() - agent_map["news_analyst"].updated_at).total_seconds() / 3600
+            if age_hours < 4:
+                need_news = False
 
-    need_news = True
-    if "news_analyst" in agent_map:
-        age_hours = (datetime.utcnow() - agent_map["news_analyst"].updated_at).total_seconds() / 3600
-        if age_hours < 4:
-            need_news = False
+        need_risk = True
+        if "risk_analyst" in agent_map:
+            age_days = (datetime.utcnow() - agent_map["risk_analyst"].updated_at).days
+            if age_days < 3:
+                need_risk = False
 
-    need_risk = True
-    if "risk_analyst" in agent_map:
-        age_days = (datetime.utcnow() - agent_map["risk_analyst"].updated_at).days
-        if age_days < 3:
-            need_risk = False
+        need_macro = True
+        if "macro_analyst" in agent_map:
+            age_days = (datetime.utcnow() - agent_map["macro_analyst"].updated_at).days
+            if age_days < 7:
+                need_macro = False
 
-    need_macro = True
-    if "macro_analyst" in agent_map:
-        age_days = (datetime.utcnow() - agent_map["macro_analyst"].updated_at).days
-        if age_days < 7:
-            need_macro = False
+        need_valuation = True
+        if "valuation_analyst" in agent_map:
+            age_days = (datetime.utcnow() - agent_map["valuation_analyst"].updated_at).days
+            if age_days < 3:
+                need_valuation = False
 
-    need_valuation = True
-    if "valuation_analyst" in agent_map:
-        age_days = (datetime.utcnow() - agent_map["valuation_analyst"].updated_at).days
-        if age_days < 3:
-            need_valuation = False
+        need_sector = True
+        if "sector_analyst" in agent_map:
+            age_days = (datetime.utcnow() - agent_map["sector_analyst"].updated_at).days
+            if age_days < 7:
+                need_sector = False
 
-    need_sector = True
-    if "sector_analyst" in agent_map:
-        age_days = (datetime.utcnow() - agent_map["sector_analyst"].updated_at).days
-        if age_days < 7:
-            need_sector = False
+        # Run missing/stale agents in parallel
+        if need_fundamental or need_technical or need_news or need_risk or need_macro or need_valuation or need_sector:
+            from app.core.database import SessionLocal
+            import asyncio
+            import anyio
 
-    # Run missing/stale agents in parallel
-    if need_fundamental or need_technical or need_news or need_risk or need_macro or need_valuation or need_sector:
+            def run_fundamental_sync(t_clean: str):
+                sync_db = SessionLocal()
+                try:
+                    comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+                    if comp:
+                        if not comp.financials:
+                            from app.services.ingestion import IngestionService
+                            IngestionService.enrich_company_data_live(sync_db, comp)
+                        asyncio.run(FundamentalAnalystAgent.analyze_company(sync_db, comp))
+                except Exception as e:
+                    logger.error(f"Fundamental agent parallel thread error: {e}")
+                finally:
+                    sync_db.close()
+
+            def run_technical_sync(t_clean: str):
+                sync_db = SessionLocal()
+                try:
+                    comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+                    if comp:
+                        from sqlalchemy import select
+                        from app.models.price_history import PriceHistory
+                        stmt_price = select(PriceHistory).where(PriceHistory.company_id == comp.id).limit(1)
+                        has_price = sync_db.execute(stmt_price).scalar() is not None
+                        if not has_price:
+                            from app.services.ingestion import IngestionService
+                            IngestionService.enrich_company_data_live(sync_db, comp)
+                        asyncio.run(TechnicalAnalystAgent.analyze_company(sync_db, comp))
+                except Exception as e:
+                    logger.error(f"Technical agent parallel thread error: {e}")
+                finally:
+                    sync_db.close()
+
+            def run_news_sync(t_clean: str):
+                sync_db = SessionLocal()
+                try:
+                    comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+                    if comp:
+                        asyncio.run(NewsAnalystAgent.analyze_company(sync_db, comp))
+                except Exception as e:
+                    logger.error(f"News agent parallel thread error: {e}")
+                finally:
+                    sync_db.close()
+
+            def run_risk_sync(t_clean: str):
+                sync_db = SessionLocal()
+                try:
+                    comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+                    if comp:
+                        asyncio.run(RiskAnalystAgent.analyze_company(sync_db, comp))
+                except Exception as e:
+                    logger.error(f"Risk agent parallel thread error: {e}")
+                finally:
+                    sync_db.close()
+
+            def run_macro_sync(t_clean: str):
+                sync_db = SessionLocal()
+                try:
+                    comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+                    if comp:
+                        asyncio.run(MacroAnalystAgent.analyze_company(sync_db, comp))
+                except Exception as e:
+                    logger.error(f"Macro agent parallel thread error: {e}")
+                finally:
+                    sync_db.close()
+
+            def run_valuation_sync(t_clean: str):
+                sync_db = SessionLocal()
+                try:
+                    comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+                    if comp:
+                        asyncio.run(ValuationAnalystAgent.analyze_company(sync_db, comp))
+                except Exception as e:
+                    logger.error(f"Valuation agent parallel thread error: {e}")
+                finally:
+                    sync_db.close()
+
+            def run_sector_sync(t_clean: str):
+                sync_db = SessionLocal()
+                try:
+                    comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
+                    if comp:
+                        asyncio.run(SectorAnalystAgent.analyze_company(sync_db, comp))
+                except Exception as e:
+                    logger.error(f"Sector agent parallel thread error: {e}")
+                finally:
+                    sync_db.close()
+
+            async def run_agents_in_parallel():
+                async with anyio.create_task_group() as tg:
+                    if need_fundamental:
+                        tg.start_soon(anyio.to_thread.run_sync, run_fundamental_sync, ticker_clean)
+                    if need_technical:
+                        tg.start_soon(anyio.to_thread.run_sync, run_technical_sync, ticker_clean)
+                    if need_news:
+                        tg.start_soon(anyio.to_thread.run_sync, run_news_sync, ticker_clean)
+                    if need_risk:
+                        tg.start_soon(anyio.to_thread.run_sync, run_risk_sync, ticker_clean)
+                    if need_macro:
+                        tg.start_soon(anyio.to_thread.run_sync, run_macro_sync, ticker_clean)
+                    if need_valuation:
+                        tg.start_soon(anyio.to_thread.run_sync, run_valuation_sync, ticker_clean)
+                    if need_sector:
+                        tg.start_soon(anyio.to_thread.run_sync, run_sector_sync, ticker_clean)
+
+            await run_agents_in_parallel()
+
+        # Run aggregator in thread (sync ORM)
         from app.core.database import SessionLocal
-        import asyncio
         import anyio
 
-        def run_fundamental_sync(t_clean: str):
+        def _run_aggregator():
             sync_db = SessionLocal()
             try:
-                comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
-                if comp:
-                    if not comp.financials:
-                        from app.services.ingestion import IngestionService
-                        IngestionService.enrich_company_data_live(sync_db, comp)
-                    asyncio.run(FundamentalAnalystAgent.analyze_company(sync_db, comp))
-            except Exception as e:
-                logger.error(f"Fundamental agent parallel thread error: {e}")
+                sync_company = sync_db.query(Company).filter(Company.ticker == ticker_clean).first()
+                if not sync_company:
+                    return None
+                report = AggregatorAgent.generate_kundli_report(sync_db, sync_company, lang=lang)
+                return report.model_dump(mode="json")
             finally:
                 sync_db.close()
 
-        def run_technical_sync(t_clean: str):
-            sync_db = SessionLocal()
-            try:
-                comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
-                if comp:
-                    from sqlalchemy import select
-                    from app.models.price_history import PriceHistory
-                    stmt_price = select(PriceHistory).where(PriceHistory.company_id == comp.id).limit(1)
-                    has_price = sync_db.execute(stmt_price).scalar() is not None
-                    if not has_price:
-                        from app.services.ingestion import IngestionService
-                        IngestionService.enrich_company_data_live(sync_db, comp)
-                    asyncio.run(TechnicalAnalystAgent.analyze_company(sync_db, comp))
-            except Exception as e:
-                logger.error(f"Technical agent parallel thread error: {e}")
-            finally:
-                sync_db.close()
+        report_dict = await anyio.to_thread.run_sync(_run_aggregator)
+        if report_dict is None:
+            raise HTTPException(status_code=404, detail=f"Company '{ticker_clean}' not found.")
 
-        def run_news_sync(t_clean: str):
-            sync_db = SessionLocal()
-            try:
-                comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
-                if comp:
-                    asyncio.run(NewsAnalystAgent.analyze_company(sync_db, comp))
-            except Exception as e:
-                logger.error(f"News agent parallel thread error: {e}")
-            finally:
-                sync_db.close()
+        # Cache for 4 hours
+        await cache.set(cache_key, report_dict, ttl_seconds=14400)
 
-        def run_risk_sync(t_clean: str):
-            sync_db = SessionLocal()
-            try:
-                comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
-                if comp:
-                    asyncio.run(RiskAnalystAgent.analyze_company(sync_db, comp))
-            except Exception as e:
-                logger.error(f"Risk agent parallel thread error: {e}")
-            finally:
-                sync_db.close()
-
-        def run_macro_sync(t_clean: str):
-            sync_db = SessionLocal()
-            try:
-                comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
-                if comp:
-                    asyncio.run(MacroAnalystAgent.analyze_company(sync_db, comp))
-            except Exception as e:
-                logger.error(f"Macro agent parallel thread error: {e}")
-            finally:
-                sync_db.close()
-
-        def run_valuation_sync(t_clean: str):
-            sync_db = SessionLocal()
-            try:
-                comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
-                if comp:
-                    asyncio.run(ValuationAnalystAgent.analyze_company(sync_db, comp))
-            except Exception as e:
-                logger.error(f"Valuation agent parallel thread error: {e}")
-            finally:
-                sync_db.close()
-
-        def run_sector_sync(t_clean: str):
-            sync_db = SessionLocal()
-            try:
-                comp = sync_db.query(Company).filter(Company.ticker == t_clean).first()
-                if comp:
-                    asyncio.run(SectorAnalystAgent.analyze_company(sync_db, comp))
-            except Exception as e:
-                logger.error(f"Sector agent parallel thread error: {e}")
-            finally:
-                sync_db.close()
-
-        async def run_agents_in_parallel():
-            async with anyio.create_task_group() as tg:
-                if need_fundamental:
-                    tg.start_soon(anyio.to_thread.run_sync, run_fundamental_sync, ticker_clean)
-                if need_technical:
-                    tg.start_soon(anyio.to_thread.run_sync, run_technical_sync, ticker_clean)
-                if need_news:
-                    tg.start_soon(anyio.to_thread.run_sync, run_news_sync, ticker_clean)
-                if need_risk:
-                    tg.start_soon(anyio.to_thread.run_sync, run_risk_sync, ticker_clean)
-                if need_macro:
-                    tg.start_soon(anyio.to_thread.run_sync, run_macro_sync, ticker_clean)
-                if need_valuation:
-                    tg.start_soon(anyio.to_thread.run_sync, run_valuation_sync, ticker_clean)
-                if need_sector:
-                    tg.start_soon(anyio.to_thread.run_sync, run_sector_sync, ticker_clean)
-
-        await run_agents_in_parallel()
-
-    # Run aggregator in thread (sync ORM)
-    from app.core.database import SessionLocal
-    import anyio
-
-    def _run_aggregator():
-        sync_db = SessionLocal()
-        try:
-            sync_company = sync_db.query(Company).filter(Company.ticker == ticker_clean).first()
-            if not sync_company:
-                return None
-            report = AggregatorAgent.generate_kundli_report(sync_db, sync_company, lang=lang)
-            return report.model_dump(mode="json")
-        finally:
-            sync_db.close()
-
-    report_dict = await anyio.to_thread.run_sync(_run_aggregator)
-    if report_dict is None:
-        raise HTTPException(status_code=404, detail=f"Company '{ticker_clean}' not found.")
-
-    # Cache for 4 hours
-    await cache.set(cache_key, report_dict, ttl_seconds=14400)
+    # 2. Plan-based Response Masking
+    if not has_feature(user_plan, "full_kundli"):
+        # Mask the response for Standard users
+        return {
+            "overall_score": report_dict.get("overall_score"),
+            "signal": report_dict.get("signal"),
+            "strengths": report_dict.get("strengths", [])[:3],
+            "risks": report_dict.get("risks", [])[:3],
+            "locked_sections": STANDARD_LOCKED_SECTIONS,
+            "upgrade_required": True,
+            "message": "Upgrade to Pro to unlock the full 7-agent consensus report."
+        }
 
     return report_dict
 
 
 @router.get("/macro-data/indicators", response_model=dict)
-async def get_macro_indicators(db: AsyncSession = Depends(get_db)):
+async def get_macro_indicators(db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_feature('macro_analysis'))):
     """
     Fetches the latest macroeconomic indicators from the database.
     """
@@ -1344,7 +1394,8 @@ async def get_macro_indicators(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{ticker}/peers", response_model=dict)
-async def get_company_peers(ticker: str, db: AsyncSession = Depends(get_db)):
+async def get_company_peers(ticker: str, db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_feature('sector_analysis'))):
     """
     Returns peer benchmarking parameters for same-sector companies.
     """
@@ -1483,7 +1534,8 @@ async def get_company_peers(ticker: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{ticker}/valuation-history", response_model=dict)
-async def get_valuation_history(ticker: str, db: AsyncSession = Depends(get_db)):
+async def get_valuation_history(ticker: str, db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_feature('valuation_analysis'))):
     """
     Returns historical valuation multiples and DCF margin-of-safety trends.
     """
@@ -1572,7 +1624,8 @@ async def get_valuation_history(ticker: str, db: AsyncSession = Depends(get_db))
 
 
 @router.get("/{ticker}/sentiment-analysis", response_model=dict)
-async def get_sentiment_analysis(ticker: str, db: AsyncSession = Depends(get_db)):
+async def get_sentiment_analysis(ticker: str, db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_feature('sentiment_analysis'))):
     """
     Returns FinBERT 3-dimensional daily sentiment analysis and rolling historical scores.
     """
@@ -1670,7 +1723,8 @@ async def get_sentiment_analysis(ticker: str, db: AsyncSession = Depends(get_db)
 
 
 @router.get("/{ticker}/corporate-events", response_model=dict)
-async def get_corporate_events(ticker: str, db: AsyncSession = Depends(get_db)):
+async def get_corporate_events(ticker: str, db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_feature('risk_analysis'))):
     """
     Returns chronological list of corporate actions (Splits, Dividends, M&A) for the company.
     """
@@ -1718,7 +1772,8 @@ async def get_corporate_events(ticker: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{ticker}/social-signals", response_model=dict)
-async def get_social_signals(ticker: str, db: AsyncSession = Depends(get_db)):
+async def get_social_signals(ticker: str, db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_feature('sentiment_analysis'))):
     """
     Returns social commentary and Twitter/X sentiment signals for the company.
     """
@@ -1804,7 +1859,8 @@ async def get_live_news_ticker(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{ticker}/signal-history", response_model=dict)
-async def get_company_signal_history(ticker: str, db: AsyncSession = Depends(get_db)):
+async def get_company_signal_history(ticker: str, db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_feature('advanced_scoring'))):
     """
     Returns the chronological list of rating transitions/changes for a stock.
     """
@@ -1844,7 +1900,8 @@ async def get_company_intraday_prices(
     ticker: str,
     user_id: int = 1,
     db: AsyncSession = Depends(get_db)
-):
+,
+    _: str = Depends(require_feature('technical_analysis'))):
     """
     Returns 5-minute intraday price history for a stock.
     Restricted to Pro+ and Advisor plans (pro/advisor).
