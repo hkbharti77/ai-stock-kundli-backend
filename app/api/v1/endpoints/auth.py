@@ -109,8 +109,10 @@ def send_otp_email(to_email: str, otp_code: str):
             return
         except Exception as e:
             print(f"\n[⚠️ RESEND ERROR] Failed to send email via Resend API: {e}")
-            print(f"[✅ OTP BYPASS] Verification OTP for {to_email} is: {otp_code}\n")
-            return
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Resend API dispatch failure: {str(e)}"
+            )
 
     # Fallback to SMTP
     msg = MIMEMultipart("alternative")
@@ -128,7 +130,10 @@ def send_otp_email(to_email: str, otp_code: str):
             server.sendmail(settings.SMTP_USERNAME, to_email, msg.as_string())
     except OSError as e:
         print(f"\n[⚠️ SMTP BLOCKED] Network unreachable (Render Free Tier?).")
-        print(f"[✅ OTP BYPASS] Verification OTP for {to_email} is: {otp_code}\n")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"SMTP dispatch failure: Network unreachable. Error: {str(e)}"
+        )
     except Exception as e:
         print(f"[SMTP Error] Failed to send email to {to_email}: {e}")
         raise HTTPException(
@@ -185,8 +190,10 @@ def _send_reset_otp_email(to_email: str, otp_code: str):
             return
         except Exception as e:
             print(f"\n[⚠️ RESEND ERROR] Failed to send reset email via Resend API: {e}")
-            print(f"[✅ OTP BYPASS] Password Reset OTP for {to_email} is: {otp_code}\n")
-            return
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Resend API dispatch failure: {str(e)}"
+            )
 
     # Fallback to SMTP
     msg = MIMEMultipart("alternative")
@@ -204,7 +211,10 @@ def _send_reset_otp_email(to_email: str, otp_code: str):
             server.sendmail(settings.SMTP_USERNAME, to_email, msg.as_string())
     except OSError as e:
         print(f"\n[⚠️ SMTP BLOCKED] Network unreachable (Render Free Tier?).")
-        print(f"[✅ OTP BYPASS] Password Reset OTP for {to_email} is: {otp_code}\n")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"SMTP dispatch failure: Network unreachable. Error: {str(e)}"
+        )
     except Exception as e:
         print(f"[SMTP Error] Failed to send reset email to {to_email}: {e}")
         raise HTTPException(
@@ -310,10 +320,6 @@ async def signup(
             if time.time() < expires_at and cached_val == "true":
                 del otp_store[cache_key]
                 otp_verified_in_cache = True
-                
-    # Fallback to local dev testing if SMTP not fully populated
-    if not settings.SMTP_USERNAME:
-        otp_verified_in_cache = True
 
     if not otp_verified_in_cache:
         raise HTTPException(
