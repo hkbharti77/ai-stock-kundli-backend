@@ -86,42 +86,6 @@ async def lifespan(app: FastAPI):
                     conn.execute(text("ALTER TABLE users ADD COLUMN trial_used BOOLEAN DEFAULT FALSE"))
                 if "trial_expires_at" not in cols_users:
                     conn.execute(text("ALTER TABLE users ADD COLUMN trial_expires_at TIMESTAMP"))
-
-                # ── Custom White-Label Advisor Branding ──
-                if "advisor_brand_name" not in cols_users:
-                    conn.execute(text("ALTER TABLE users ADD COLUMN advisor_brand_name VARCHAR(255)"))
-                if "advisor_logo_url" not in cols_users:
-                    conn.execute(text("ALTER TABLE users ADD COLUMN advisor_logo_url VARCHAR(500)"))
-                if "advisor_brand_color" not in cols_users:
-                    conn.execute(text("ALTER TABLE users ADD COLUMN advisor_brand_color VARCHAR(7)"))
-                if "advisor_brand_color_secondary" not in cols_users:
-                    conn.execute(text("ALTER TABLE users ADD COLUMN advisor_brand_color_secondary VARCHAR(7)"))
-
-                # ── Multi-Step SEBI Compliance & Registration Fields ──
-                if "phone" not in cols_users:
-                    conn.execute(text("ALTER TABLE users ADD COLUMN phone VARCHAR(20)"))
-                if "otp_verified" not in cols_users:
-                    conn.execute(text("ALTER TABLE users ADD COLUMN otp_verified BOOLEAN DEFAULT FALSE"))
-                if "city" not in cols_users:
-                    conn.execute(text("ALTER TABLE users ADD COLUMN city VARCHAR(100)"))
-                if "dob" not in cols_users:
-                    conn.execute(text("ALTER TABLE users ADD COLUMN dob VARCHAR(20)"))
-                if "pan" not in cols_users:
-                    conn.execute(text("ALTER TABLE users ADD COLUMN pan VARCHAR(10)"))
-                
-                # ── Investor Profile ──
-                if "risk_appetite" not in cols_users:
-                    conn.execute(text("ALTER TABLE users ADD COLUMN risk_appetite VARCHAR(50)"))
-                if "experience" not in cols_users:
-                    conn.execute(text("ALTER TABLE users ADD COLUMN experience VARCHAR(50)"))
-                if "goal" not in cols_users:
-                    conn.execute(text("ALTER TABLE users ADD COLUMN goal VARCHAR(100)"))
-                if "horizon" not in cols_users:
-                    conn.execute(text("ALTER TABLE users ADD COLUMN horizon VARCHAR(50)"))
-                
-                # ── Legal & Mandate ──
-                if "disclaimer_accepted" not in cols_users:
-                    conn.execute(text("ALTER TABLE users ADD COLUMN disclaimer_accepted BOOLEAN DEFAULT FALSE"))
                 
 
                 # api_keys table
@@ -147,10 +111,10 @@ async def lifespan(app: FastAPI):
         await anyio.to_thread.run_sync(_create_tables)
         print("[STARTUP] Database schema verified & synced successfully.")
         
-        # Initialize vector store (DISABLED TEMPORARILY FOR RENDER FREE TIER OOM AVOIDANCE)
-        # from app.services.embedding_service import EmbeddingService
-        # EmbeddingService.initialize_store()
-        # print("[STARTUP] FAISS Vector Store initialized successfully.")
+        # Initialize vector store
+        from app.services.embedding_service import EmbeddingService
+        EmbeddingService.initialize_store()
+        print("[STARTUP] FAISS Vector Store initialized successfully.")
     except Exception as e:
         print(f"[STARTUP ERROR] Startup initialization failed: {e}")
         

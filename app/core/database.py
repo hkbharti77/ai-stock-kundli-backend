@@ -15,11 +15,8 @@ from app.core.config import get_settings
 settings = get_settings()
 
 # ── Async Setup (Used for FastAPI endpoints) ──────────────────
-# asyncpg strictly requires `ssl=require` instead of `sslmode=require`
-async_url = settings.DATABASE_URL.replace("sslmode=require", "ssl=require").replace("sslmode=true", "ssl=require")
-
 engine = create_async_engine(
-    async_url,
+    settings.DATABASE_URL,
     echo=settings.DEBUG,
     pool_size=20,
     max_overflow=10,
@@ -53,9 +50,6 @@ async def get_db() -> AsyncSession:
 
 # ── Sync Setup (Used for Celery background tasks & seeders) ──
 sync_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
-# Fix SSL param mismatch between asyncpg (ssl=require) and psycopg2 (sslmode=require)
-sync_url = sync_url.replace("ssl=require", "sslmode=require").replace("ssl=true", "sslmode=require")
-
 sync_engine = create_engine(
     sync_url,
     echo=settings.DEBUG,
