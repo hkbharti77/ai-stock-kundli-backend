@@ -48,11 +48,12 @@ class Settings(BaseSettings):
     OLLAMA_API_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "gemma4:31b-cloud"
 
-    # ── SMTP Email Server ───────────────────────────────────
+    # ── SMTP Email Server / Resend ──────────────────────────
     SMTP_HOST: str = "smtp.gmail.com"
     SMTP_PORT: int = 587
     SMTP_USERNAME: str = ""
     SMTP_PASSWORD: str = ""
+    RESEND_API_KEY: str = ""
     ADMIN_EMAIL: str = ""
 
     # ── Razorpay Integration ────────────────────────────────

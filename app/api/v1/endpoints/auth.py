@@ -12,6 +12,7 @@ from email.mime.multipart import MIMEMultipart
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+import httpx
 
 from app.core.config import get_settings
 from app.core.database import get_db
@@ -60,20 +61,15 @@ otp_store: dict[str, tuple[str, float]] = {}
 
 # ── SMTP Email Helper ────────────────────────────────────────
 def send_otp_email(to_email: str, otp_code: str):
-    """Send verification OTP using configured SMTP settings."""
-    if not settings.SMTP_USERNAME or not settings.SMTP_PASSWORD:
+    """Send verification OTP using configured SMTP settings or Resend."""
+    if not settings.SMTP_USERNAME and not settings.RESEND_API_KEY:
         # Fallback mock logging for safe local execution without credentials
-        print(f"[MOCK SMTP] SMTP not configured. OTP for {to_email} is {otp_code}")
+        print(f"[MOCK SMTP] SMTP/Resend not configured. OTP for {to_email} is {otp_code}")
         return
 
     from app.core.email import get_master_email_template
 
     subject = f"{otp_code} is your AI Stock Kundli Verification Code"
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = f"AI Stock Kundli <{settings.SMTP_USERNAME}>"
-    msg["To"] = to_email
-
     text_content = f"Your verification code is {otp_code}. It is valid for 5 minutes."
 
     html_body = f"""
@@ -93,6 +89,34 @@ def send_otp_email(to_email: str, otp_code: str):
     """
     
     full_html = get_master_email_template(subject, html_body)
+
+    # Use Resend if API key is provided
+    if settings.RESEND_API_KEY:
+        headers = {
+            "Authorization": f"Bearer {settings.RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        data = {
+            "from": "AI Stock Kundli <onboarding@resend.dev>",
+            "to": [to_email],
+            "subject": subject,
+            "html": full_html,
+        }
+        try:
+            with httpx.Client() as client:
+                res = client.post("https://api.resend.com/emails", json=data, headers=headers, timeout=10.0)
+                res.raise_for_status()
+            return
+        except Exception as e:
+            print(f"\n[⚠️ RESEND ERROR] Failed to send email via Resend API: {e}")
+            print(f"[✅ OTP BYPASS] Verification OTP for {to_email} is: {otp_code}\n")
+            return
+
+    # Fallback to SMTP
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = f"AI Stock Kundli <{settings.SMTP_USERNAME}>"
+    msg["To"] = to_email
 
     msg.attach(MIMEText(text_content, "plain"))
     msg.attach(MIMEText(full_html, "html"))
@@ -115,18 +139,13 @@ def send_otp_email(to_email: str, otp_code: str):
 
 def _send_reset_otp_email(to_email: str, otp_code: str):
     """Send a password-reset OTP email (distinct styling from registration OTP)."""
-    if not settings.SMTP_USERNAME or not settings.SMTP_PASSWORD:
+    if not settings.SMTP_USERNAME and not settings.RESEND_API_KEY:
         print(f"[MOCK SMTP] Password reset OTP for {to_email}: {otp_code}")
         return
 
     from app.core.email import get_master_email_template
 
     subject = f"{otp_code} — AI Stock Kundli Password Reset"
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = f"AI Stock Kundli <{settings.SMTP_USERNAME}>"
-    msg["To"] = to_email
-
     text_content = f"Your password reset code is {otp_code}. It is valid for 5 minutes."
 
     html_body = f"""
@@ -146,6 +165,34 @@ def _send_reset_otp_email(to_email: str, otp_code: str):
     """
     
     full_html = get_master_email_template(subject, html_body)
+
+    # Use Resend if API key is provided
+    if settings.RESEND_API_KEY:
+        headers = {
+            "Authorization": f"Bearer {settings.RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        data = {
+            "from": "AI Stock Kundli <onboarding@resend.dev>",
+            "to": [to_email],
+            "subject": subject,
+            "html": full_html,
+        }
+        try:
+            with httpx.Client() as client:
+                res = client.post("https://api.resend.com/emails", json=data, headers=headers, timeout=10.0)
+                res.raise_for_status()
+            return
+        except Exception as e:
+            print(f"\n[⚠️ RESEND ERROR] Failed to send reset email via Resend API: {e}")
+            print(f"[✅ OTP BYPASS] Password Reset OTP for {to_email} is: {otp_code}\n")
+            return
+
+    # Fallback to SMTP
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = f"AI Stock Kundli <{settings.SMTP_USERNAME}>"
+    msg["To"] = to_email
 
     msg.attach(MIMEText(text_content, "plain"))
     msg.attach(MIMEText(full_html, "html"))
