@@ -111,10 +111,10 @@ async def lifespan(app: FastAPI):
         await anyio.to_thread.run_sync(_create_tables)
         print("[STARTUP] Database schema verified & synced successfully.")
         
-        # Initialize vector store
-        from app.services.embedding_service import EmbeddingService
-        EmbeddingService.initialize_store()
-        print("[STARTUP] FAISS Vector Store initialized successfully.")
+        # Initialize vector store (DISABLED TEMPORARILY FOR RENDER FREE TIER OOM AVOIDANCE)
+        # from app.services.embedding_service import EmbeddingService
+        # EmbeddingService.initialize_store()
+        # print("[STARTUP] FAISS Vector Store initialized successfully.")
     except Exception as e:
         print(f"[STARTUP ERROR] Startup initialization failed: {e}")
         

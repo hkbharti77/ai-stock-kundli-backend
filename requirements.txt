@@ -22,7 +22,3 @@ beautifulsoup4
 httpx
 numpy
 pytz
-faiss-cpu
-sentence-transformers
-torch
-transformers
