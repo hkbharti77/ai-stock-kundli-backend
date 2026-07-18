@@ -14,3 +14,4 @@ sentry-sdk[fastapi]>=2.0.0
 apscheduler>=3.10.0
 
 psycopg2-binary
+pandas
