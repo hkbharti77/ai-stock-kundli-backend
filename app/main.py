@@ -124,6 +124,14 @@ async def lifespan(app: FastAPI):
     intraday_task = asyncio.create_task(run_intraday_ticker_loop())
     print("[STARTUP] Background Intraday Loop task created.")
     
+    # Start the background Screener task (APScheduler)
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from app.tasks.screener_job import run_screener_batch
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(run_screener_batch, 'interval', minutes=60)
+    scheduler.start()
+    print("[STARTUP] APScheduler for Screener task started.")
+    
     yield
     # ── Shutdown ─────────────────────────────────────────
     print(f"[SHUTDOWN] {settings.APP_NAME} shutting down...")
@@ -132,6 +140,12 @@ async def lifespan(app: FastAPI):
         await intraday_task
     except asyncio.CancelledError:
         print("[SHUTDOWN] Background Intraday Loop task cancelled successfully.")
+        
+    try:
+        scheduler.shutdown()
+        print("[SHUTDOWN] APScheduler shut down successfully.")
+    except Exception as e:
+        print(f"[SHUTDOWN] Error shutting down scheduler: {e}")
 
 
 app = FastAPI(

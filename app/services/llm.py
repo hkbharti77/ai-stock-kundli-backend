@@ -169,25 +169,33 @@ Do NOT include any markdown code fences around the JSON (e.g. do not write ```js
     @staticmethod
     async def _call_openai(prompt: str) -> Optional[Dict[str, Any]]:
         api_key = settings.OPENAI_API_KEY
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             headers = {
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json"
             }
             body = {
-                "model": "gpt-4o",
+                "model": settings.OPENAI_MODEL,
                 "messages": [
                     {"role": "system", "content": "You are a helpful assistant that returns only valid JSON."},
                     {"role": "user", "content": prompt}
                 ],
-                "temperature": 0.2,
-                "response_format": {"type": "json_object"}
+                "temperature": 0.2
             }
-            response = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=body)
+            url = f"{settings.OPENAI_API_BASE.rstrip('/')}/chat/completions"
+            response = await client.post(url, headers=headers, json=body)
             if response.status_code == 200:
                 res_data = response.json()
                 content = res_data["choices"][0]["message"]["content"]
-                return json.loads(content)
+                try:
+                    return json.loads(content)
+                except Exception as json_err:
+                    import re
+                    match = re.search(r"\{.*\}", content, re.DOTALL)
+                    if match:
+                        return json.loads(match.group(0))
+                    logger.error(f"OpenAI JSON parse error: {str(json_err)}. Response was: {content}")
+                    raise
             else:
                 logger.error(f"OpenAI response error: Status {response.status_code}, {response.text}")
         return None
@@ -282,13 +290,14 @@ Do NOT include any markdown code fences around the JSON (e.g. do not write ```js
                 "Content-Type": "application/json"
             }
             body = {
-                "model": "gpt-4o",
+                "model": settings.OPENAI_MODEL,
                 "messages": [
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.3
             }
-            response = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=body)
+            url = f"{settings.OPENAI_API_BASE.rstrip('/')}/chat/completions"
+            response = await client.post(url, headers=headers, json=body)
             if response.status_code == 200:
                 res_data = response.json()
                 return res_data["choices"][0]["message"]["content"]

@@ -26,6 +26,9 @@ class Company(Base):
     exchange: Mapped[str | None] = mapped_column(String(10), nullable=True)  # NSE / BSE
     market_cap: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    latest_kundli_score: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    previous_kundli_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_analyzed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow

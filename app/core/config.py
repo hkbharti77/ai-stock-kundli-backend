@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "auto"
     DEEPSEEK_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
+    OPENAI_API_BASE: str = "https://api.openai.com/v1"
+    OPENAI_MODEL: str = "gpt-4o"
     GEMINI_API_KEY: str = ""
     OLLAMA_API_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "gemma4:31b-cloud"

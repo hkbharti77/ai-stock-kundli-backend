@@ -110,3 +110,4 @@ env/
 
 # Custom project ignore
 scratch/
+logs/
