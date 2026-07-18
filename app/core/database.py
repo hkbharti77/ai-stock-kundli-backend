@@ -50,6 +50,9 @@ async def get_db() -> AsyncSession:
 
 # ── Sync Setup (Used for Celery background tasks & seeders) ──
 sync_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
+# Fix SSL param mismatch between asyncpg (ssl=require) and psycopg2 (sslmode=require)
+sync_url = sync_url.replace("ssl=require", "sslmode=require").replace("ssl=true", "sslmode=require")
+
 sync_engine = create_engine(
     sync_url,
     echo=settings.DEBUG,
