@@ -15,8 +15,11 @@ from app.core.config import get_settings
 settings = get_settings()
 
 # ── Async Setup (Used for FastAPI endpoints) ──────────────────
+# asyncpg strictly requires `ssl=require` instead of `sslmode=require`
+async_url = settings.DATABASE_URL.replace("sslmode=require", "ssl=require").replace("sslmode=true", "ssl=require")
+
 engine = create_async_engine(
-    settings.DATABASE_URL,
+    async_url,
     echo=settings.DEBUG,
     pool_size=20,
     max_overflow=10,

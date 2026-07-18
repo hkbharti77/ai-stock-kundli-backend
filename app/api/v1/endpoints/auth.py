@@ -291,11 +291,19 @@ async def signup(
 
     # Double check OTP verification cache to enforce security
     otp_verified_in_cache = False
+    
+    # Try Redis first if available
     if redis_client:
-        otp_verified_in_cache = redis_client.get(f"verified:{payload.email}") == "true"
-        if otp_verified_in_cache:
-            redis_client.delete(f"verified:{payload.email}")
-    else:
+        try:
+            otp_verified_in_cache = redis_client.get(f"verified:{payload.email}") == "true"
+            if otp_verified_in_cache:
+                redis_client.delete(f"verified:{payload.email}")
+        except Exception as e:
+            print(f"[Redis Error] Failed to read from Redis during signup: {e}")
+            otp_verified_in_cache = False
+
+    # Fallback to local store if redis failed or wasn't configured
+    if not otp_verified_in_cache:
         cache_key = f"verified:{payload.email}"
         if cache_key in otp_store:
             cached_val, expires_at = otp_store[cache_key]
