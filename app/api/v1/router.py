@@ -15,7 +15,7 @@ from app.api.v1.endpoints.advisor import router as advisor_router
 from app.api.v1.endpoints.backtest import router as backtest_router
 from app.api.v1.endpoints.developer import router as developer_router
 from app.api.v1.endpoints.admin import router as admin_router
-from app.api.v1.endpoints.query import router as query_router
+# from app.api.v1.endpoints.query import router as query_router
 from app.api.v1.endpoints.disclaimer import router as disclaimer_router
 from app.api.v1.endpoints.screener import router as screener_router
 
@@ -33,7 +33,7 @@ api_router.include_router(advisor_router)
 api_router.include_router(backtest_router)
 api_router.include_router(developer_router)
 api_router.include_router(admin_router)
-api_router.include_router(query_router, prefix="/query", tags=["Query"])
+# api_router.include_router(query_router, prefix="/query", tags=["Query"])
 api_router.include_router(disclaimer_router, tags=["Legal"])
 api_router.include_router(screener_router, prefix="/screener", tags=["Screener"])
 
