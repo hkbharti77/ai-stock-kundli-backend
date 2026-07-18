@@ -17,3 +17,12 @@ psycopg2-binary
 pandas
 pandas-ta
 yfinance
+fpdf2
+beautifulsoup4
+httpx
+numpy
+pytz
+faiss-cpu
+sentence-transformers
+torch
+transformers
